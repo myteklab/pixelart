@@ -8,8 +8,3 @@ This application is built on top of [Piskel](https://www.piskelapp.com/), an ope
 
 - **Original project**: [github.com/piskelapp/piskel](https://github.com/piskelapp/piskel)
 - **License**: Apache License 2.0
-
-## Changes from upstream
-
-- Integrated with the mytekDev platform (project saving, sharing, asset library)
-- Custom styling to match the platform theme
