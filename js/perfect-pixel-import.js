@@ -2,13 +2,14 @@
  * perfect-pixel-import.js — wires PerfectPixel grid snapping into the
  * Piskel import wizard.
  *
- * Adds a "Snap to pixel grid" option to the image import step:
+ * Adds a "Snap to pixel grid" card to the image import step:
  *   - detects the pixel grid in the background when an image loads and shows
- *     the detected size next to the option
- *   - a short explainer tells students what the feature does
+ *     the detected size in the card
  *   - when enabled, the resize fields are filled with the true resolution,
  *     a live snapped preview replaces the import preview, and a dropdown
  *     picks how each pixel's color is chosen (most common / center / median)
+ *   - images with no hidden grid (photos, drawings) can still be converted:
+ *     the typed size becomes a uniform pixelation grid
  *   - import goes through PerfectPixel instead of a plain resize, reusing
  *     the previewed result when possible
  *
@@ -24,8 +25,9 @@
   var MAX_POLLS = 200;
   var pollCount = 0;
 
-  var EXPLAINER_TEXT = 'AI pixel art is often fuzzy and uneven. This finds the real grid ' +
-    'and rebuilds the picture with clean pixels.';
+  var EXPLAINER_TEXT = 'Some images look like pixel art but are really fuzzy or uneven up close. ' +
+    'This finds the hidden grid and rebuilds the picture with clean, true-size pixels. ' +
+    'No grid? Type a size above to pixelate any photo or drawing.';
 
   var SAMPLE_METHODS = [
     { value: 'majority', label: 'Most common color' },
@@ -59,14 +61,20 @@
     var style = document.createElement('style');
     style.id = 'pp-snap-styles';
     style.textContent = [
-      // The import step was already at the dialog's height limit before this
-      // section was added; let it scroll instead of clipping.
+      // The stock import dialog (500x350) has no room for the snap card;
+      // give the whole wizard a taller box.
+      '#dialog-container.import { height: 540px; margin-top: -270px; }',
       '.import-image-container { overflow-y: auto; }',
-      '.pp-snap-explainer { font-size: 11px; opacity: 0.65; line-height: 1.4;',
-      '  margin: 4px 0 0 0; max-width: 210px; }',
-      '.pp-snap-method-row { margin-top: 6px; font-size: 12px; max-width: 210px; }',
-      '.pp-snap-method-row select { font-size: 12px; margin-left: 4px; max-width: 150px; }',
-      '.pp-snap-status { display: block; font-size: 11px; opacity: 0.8; margin-top: 2px; }',
+      // Full-width feature card below the stock fields.
+      '.pp-snap-card { margin: 14px 0 40px 0; padding: 10px 12px; clear: both;',
+      '  background: rgba(255, 255, 255, 0.06); border: 1px solid #555; border-radius: 4px; }',
+      '.pp-snap-title-row { display: flex; align-items: center; justify-content: space-between; }',
+      '.pp-snap-title-row label { display: flex; align-items: center; cursor: pointer; }',
+      '.pp-snap-title { font-weight: bold; margin-left: 7px; }',
+      '.pp-snap-status { font-size: 12px; color: gold; margin-left: 10px; text-align: right; }',
+      '.pp-snap-explainer { font-size: 12px; opacity: 0.7; line-height: 1.5; margin: 6px 0 0 0; }',
+      '.pp-snap-method-row { margin-top: 8px; font-size: 12px; }',
+      '.pp-snap-method-row select { font-size: 12px; margin-left: 6px; }',
       // Piskel styles ".import-section-preview canvas" as absolute (its grid
       // overlay); ours must stay in the flex flow to center in the box.
       '.import-section-preview canvas.pp-snap-preview-canvas { position: static;',
@@ -134,7 +142,10 @@
             self.updateSnapPreview_();
           }
         } else {
-          self.setPixelSnapStatus_('no grid detected');
+          self.setPixelSnapStatus_('no grid found');
+          if (self.pixelSnapCheckbox_.checked) {
+            self.updateSnapPreview_();
+          }
         }
       }, 20);
     };
@@ -171,6 +182,27 @@
       return [gridW, gridH];
     };
 
+    /**
+     * Snap options for the current state. Grid line refinement and the square
+     * fixup only run while the fields still hold the detected size; a size the
+     * user typed themselves (or any grid-less image) gets an exact uniform
+     * grid, so the number they type is the size they get.
+     */
+    ImageImport.prototype.getSnapOptions_ = function (grid) {
+      var opts = { sampleMethod: this.getSnapMethod_() };
+      if (grid) {
+        opts.gridSize = grid;
+      }
+      var detected = this.pixelSnapDetected_;
+      var isDetectedSize = detected && grid &&
+        grid[0] === detected.gridW && grid[1] === detected.gridH;
+      if (!isDetectedSize) {
+        opts.refineIntensity = 0;
+        opts.fixSquare = false;
+      }
+      return opts;
+    };
+
     ImageImport.prototype.onPixelSnapChange_ = function () {
       if (this.pixelSnapCheckbox_.checked) {
         this.pixelSnapSavedFields_ = {
@@ -196,6 +228,8 @@
         this.restoreOriginalPreview_();
         if (this.pixelSnapDetected_) {
           this.setPixelSnapStatus_('detected ' + this.pixelSnapDetected_.gridW + '×' + this.pixelSnapDetected_.gridH);
+        } else {
+          this.setPixelSnapStatus_('no grid found');
         }
       }
     };
@@ -224,7 +258,7 @@
       var grid = this.getSnapGrid_();
       if (!grid && !this.pixelSnapDetected_) {
         this.restoreOriginalPreview_();
-        this.setPixelSnapStatus_('no grid found, type a size to try');
+        this.setPixelSnapStatus_('type a size above to make pixel art');
         return;
       }
       var method = this.getSnapMethod_();
@@ -235,18 +269,15 @@
         this.showSnappedPreview_(cached);
         return;
       }
-      this.setPixelSnapStatus_('snapping…');
+      this.setPixelSnapStatus_('working…');
       var self = this;
       setTimeout(function () {
         if (self.pixelSnapJob_ !== key || self.importedImage_ !== image) {
           return;
         }
         var snapped = null;
+        var opts = self.getSnapOptions_(grid);
         try {
-          var opts = { sampleMethod: method };
-          if (grid) {
-            opts.gridSize = grid;
-          }
           snapped = window.PerfectPixel.snapToCanvas(image, opts);
         } catch (e) {
           console.error('[PerfectPixel] preview snap failed', e);
@@ -255,9 +286,10 @@
           return;
         }
         if (!snapped) {
-          self.setPixelSnapStatus_('no grid found, type a size to try');
+          self.setPixelSnapStatus_('type a size above to make pixel art');
           return;
         }
+        snapped.refined = opts.refineIntensity === undefined;
         self.pixelSnapCache_[key] = snapped;
         self.showSnappedPreview_(snapped);
       }, 20);
@@ -286,7 +318,8 @@
       caption.textContent = snapped.width + '×' + snapped.height + ' pixels';
       this.importPreview.appendChild(wrap);
       this.importPreview.appendChild(caption);
-      this.setPixelSnapStatus_('snapped to ' + snapped.width + '×' + snapped.height);
+      var verb = snapped.refined ? 'snapped to ' : 'pixel art at ';
+      this.setPixelSnapStatus_(verb + snapped.width + '×' + snapped.height);
     };
 
     ImageImport.prototype.restoreOriginalPreview_ = function () {
@@ -324,6 +357,7 @@
       var method = this.getSnapMethod_();
       var key = method + ':' + (grid ? grid[0] + 'x' + grid[1] : 'auto');
       var cached = this.pixelSnapCache_[key];
+      var opts = this.getSnapOptions_(grid);
       var self = this;
       var deferred = Q.defer();
 
@@ -332,10 +366,6 @@
         var snapped = cached || null;
         if (!snapped) {
           try {
-            var opts = { sampleMethod: method };
-            if (grid) {
-              opts.gridSize = grid;
-            }
             snapped = window.PerfectPixel.snapToCanvas(image, opts);
           } catch (e) {
             console.error('[PerfectPixel] snapping failed, falling back to plain import', e);
@@ -357,28 +387,31 @@
   }
 
   function injectSnapUi(step) {
-    var smoothCheckbox = step.container.querySelector('[name=smooth-resize-checkbox]');
-    if (!smoothCheckbox) {
-      return;
-    }
-    var smoothSection = smoothCheckbox.closest('.import-section');
-    if (!smoothSection) {
+    var form = step.container.querySelector('form[name=import-image-form]');
+    if (!form) {
       return;
     }
 
     var section = document.createElement('div');
-    section.className = 'import-section import-subsection';
+    section.className = 'import-section pp-snap-card';
 
-    var title = document.createElement('span');
-    title.className = 'import-section-title';
-    title.textContent = 'Snap to pixel grid';
+    var titleRow = document.createElement('div');
+    titleRow.className = 'pp-snap-title-row';
+    var label = document.createElement('label');
     var checkbox = document.createElement('input');
     checkbox.type = 'checkbox';
     checkbox.className = 'checkbox-fix';
     checkbox.name = 'pixel-snap-checkbox';
     checkbox.value = '1';
+    var title = document.createElement('span');
+    title.className = 'pp-snap-title';
+    title.textContent = 'Snap to pixel grid';
+    label.appendChild(checkbox);
+    label.appendChild(title);
     var status = document.createElement('span');
     status.className = 'pp-snap-status';
+    titleRow.appendChild(label);
+    titleRow.appendChild(status);
 
     var explainer = document.createElement('div');
     explainer.className = 'pp-snap-explainer';
@@ -400,12 +433,10 @@
     methodRow.appendChild(methodLabel);
     methodRow.appendChild(methodSelect);
 
-    section.appendChild(title);
-    section.appendChild(checkbox);
-    section.appendChild(status);
+    section.appendChild(titleRow);
     section.appendChild(explainer);
     section.appendChild(methodRow);
-    smoothSection.parentNode.insertBefore(section, smoothSection.nextSibling);
+    form.appendChild(section);
 
     step.pixelSnapSection_ = section;
     step.pixelSnapCheckbox_ = checkbox;

@@ -398,6 +398,18 @@
     var cellW = W / gridX;
     var cellH = H / gridY;
 
+    // refineIntensity 0 means a plain uniform grid: used to pixelate images
+    // that have no underlying grid (photos, drawings), where snapping lines
+    // to gradient peaks would warp the result. Skips the Sobel pass entirely
+    // and always returns exactly gridX x gridY cells.
+    if (!(refineIntensity > 0)) {
+      var xs = [];
+      var ys = [];
+      for (var i = 0; i <= gridX; i++) { xs.push(Math.round(i * cellW)); }
+      for (i = 0; i <= gridY; i++) { ys.push(Math.round(i * cellH)); }
+      return { xCoords: xs, yCoords: ys };
+    }
+
     var gray = rgbaToGray(img);
     var sums = sobelGradientSums(gray, W, H);
     var gradX = sums.colSum;
