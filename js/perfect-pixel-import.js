@@ -334,12 +334,75 @@
       var caption = document.createElement('div');
       caption.className = 'pp-snap-preview-caption';
       var maxColors = this.getSnapMaxColors_();
-      caption.textContent = snapped.width + '×' + snapped.height + ' pixels' +
+      var resultText = snapped.width + '×' + snapped.height + ' pixels' +
         (maxColors > 0 ? ', ' + maxColors + ' colors' : '');
+      caption.textContent = resultText;
       this.importPreview.appendChild(wrap);
       this.importPreview.appendChild(caption);
+
+      // Press and hold the preview to compare with the original image.
+      canvas.title = 'Press and hold to see the original';
+      var endCompare = function () {
+        window.removeEventListener('mouseup', endCompare);
+        window.removeEventListener('touchend', endCompare);
+        if (img) { img.style.display = 'none'; }
+        wrap.style.display = '';
+        caption.textContent = resultText;
+      };
+      var startCompare = function (evt) {
+        evt.preventDefault();
+        if (img) { img.style.display = ''; }
+        wrap.style.display = 'none';
+        caption.textContent = 'original';
+        window.addEventListener('mouseup', endCompare);
+        window.addEventListener('touchend', endCompare);
+      };
+      canvas.addEventListener('mousedown', startCompare);
+      canvas.addEventListener('touchstart', startCompare);
+
       var verb = snapped.refined ? 'snapped to ' : 'pixel art at ';
       this.setPixelSnapStatus_(verb + snapped.width + '×' + snapped.height);
+    };
+
+    /**
+     * When the palette was limited, save the result's colors as a Piskel
+     * palette named after the sprite and select it, so the student can paint
+     * with those exact swatches right away. Deterministic id per sprite name
+     * keeps re-imports from piling up duplicate palettes.
+     */
+    ImageImport.prototype.createPaletteFromSnapped_ = function (snapped, name) {
+      var ctx = snapped.canvas.getContext('2d');
+      var data = ctx.getImageData(0, 0, snapped.width, snapped.height).data;
+      var seen = {};
+      var colors = [];
+      for (var i = 0; i < snapped.width * snapped.height; i++) {
+        var o = i * 4;
+        if (data[o + 3] < 128) {
+          continue;
+        }
+        var hex = '#' + ((1 << 24) | (data[o] << 16) | (data[o + 1] << 8) | data[o + 2])
+          .toString(16).slice(1);
+        if (!seen[hex]) {
+          seen[hex] = true;
+          colors.push(hex);
+        }
+      }
+      if (colors.length < 2 || colors.length > 64) {
+        return;
+      }
+      // Dark to light reads like a hand-made ramp.
+      colors.sort(function (a, b) {
+        function lum(h) {
+          return 0.299 * parseInt(h.slice(1, 3), 16) +
+            0.587 * parseInt(h.slice(3, 5), 16) +
+            0.114 * parseInt(h.slice(5, 7), 16);
+        }
+        return lum(a) - lum(b);
+      });
+      var slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'import';
+      var palette = new pskl.model.Palette('perfectpixel-' + slug, name + ' colors', colors);
+      pskl.app.paletteService.savePalette(palette);
+      pskl.UserSettings.set(pskl.UserSettings.SELECTED_PALETTE, palette.id);
     };
 
     ImageImport.prototype.restoreOriginalPreview_ = function () {
@@ -394,6 +457,13 @@
         if (!snapped) {
           originalCreatePiskel.call(self).then(deferred.resolve, deferred.reject);
           return;
+        }
+        if (self.getSnapMaxColors_() > 0) {
+          try {
+            self.createPaletteFromSnapped_(snapped, name);
+          } catch (e) {
+            console.error('[PerfectPixel] palette handoff failed', e);
+          }
         }
         var frame = pskl.utils.FrameUtils.createFromImage(snapped.canvas);
         var layer = pskl.model.Layer.fromFrames('Layer 1', [frame]);
