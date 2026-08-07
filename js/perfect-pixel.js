@@ -664,6 +664,126 @@
     return out;
   }
 
+  // ── Color quantization (median cut) ────────────────────────────
+
+  /**
+   * Reduce the image to at most maxColors opaque colors via median cut.
+   * Pixels under 50% alpha become fully transparent, the rest fully opaque:
+   * binary alpha is the pixel art convention. Returns the image unchanged
+   * when it already fits the budget.
+   */
+  function quantizeImage(img, maxColors) {
+    var n = img.width * img.height;
+    var d = img.data;
+    var counts = {};
+    var unique = 0;
+    var i;
+    for (i = 0; i < n; i++) {
+      var o = i * 4;
+      if (d[o + 3] < 128) { continue; }
+      var key = (d[o] << 16) | (d[o + 1] << 8) | d[o + 2];
+      if (counts[key] === undefined) {
+        counts[key] = 1;
+        unique++;
+      } else {
+        counts[key]++;
+      }
+    }
+    if (unique <= maxColors) {
+      return img;
+    }
+
+    // entries: [r, g, b, count]
+    var entries = [];
+    for (var k in counts) {
+      var c = +k;
+      entries.push([(c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff, counts[k]]);
+    }
+
+    function channelRanges(list) {
+      var mins = [255, 255, 255];
+      var maxs = [0, 0, 0];
+      for (var j = 0; j < list.length; j++) {
+        for (var ch = 0; ch < 3; ch++) {
+          if (list[j][ch] < mins[ch]) { mins[ch] = list[j][ch]; }
+          if (list[j][ch] > maxs[ch]) { maxs[ch] = list[j][ch]; }
+        }
+      }
+      return [maxs[0] - mins[0], maxs[1] - mins[1], maxs[2] - mins[2]];
+    }
+
+    var boxes = [entries];
+    while (boxes.length < maxColors) {
+      // split the box with the widest channel range
+      var bestBox = -1;
+      var bestRange = 0;
+      var bestChannel = 0;
+      for (i = 0; i < boxes.length; i++) {
+        if (boxes[i].length < 2) { continue; }
+        var ranges = channelRanges(boxes[i]);
+        for (var ch = 0; ch < 3; ch++) {
+          if (ranges[ch] > bestRange) {
+            bestRange = ranges[ch];
+            bestBox = i;
+            bestChannel = ch;
+          }
+        }
+      }
+      if (bestBox === -1) { break; }
+      var box = boxes[bestBox];
+      box.sort(function (a, b) { return a[bestChannel] - b[bestChannel]; });
+      var mid = Math.floor(box.length / 2);
+      boxes.splice(bestBox, 1, box.slice(0, mid), box.slice(mid));
+    }
+
+    // weighted average of each box -> palette
+    var palette = boxes.map(function (box) {
+      var sum = [0, 0, 0];
+      var total = 0;
+      for (var j = 0; j < box.length; j++) {
+        var w = box[j][3];
+        sum[0] += box[j][0] * w;
+        sum[1] += box[j][1] * w;
+        sum[2] += box[j][2] * w;
+        total += w;
+      }
+      return [Math.round(sum[0] / total), Math.round(sum[1] / total), Math.round(sum[2] / total)];
+    });
+
+    // map every unique color to its nearest palette color, then rewrite pixels
+    var mapping = {};
+    for (var key2 in counts) {
+      var cc = +key2;
+      var r = (cc >> 16) & 0xff;
+      var g = (cc >> 8) & 0xff;
+      var b = cc & 0xff;
+      var bestD = Infinity;
+      var best = palette[0];
+      for (i = 0; i < palette.length; i++) {
+        var dr = r - palette[i][0];
+        var dg = g - palette[i][1];
+        var db = b - palette[i][2];
+        var dist = dr * dr + dg * dg + db * db;
+        if (dist < bestD) { bestD = dist; best = palette[i]; }
+      }
+      mapping[key2] = best;
+    }
+
+    var out = makeImage(img.width, img.height);
+    for (i = 0; i < n; i++) {
+      var o2 = i * 4;
+      if (d[o2 + 3] < 128) {
+        continue; // stays fully transparent (zero-initialized)
+      }
+      var mapped = mapping[(d[o2] << 16) | (d[o2 + 1] << 8) | d[o2 + 2]];
+      out.data[o2] = mapped[0];
+      out.data[o2 + 1] = mapped[1];
+      out.data[o2 + 2] = mapped[2];
+      out.data[o2 + 3] = 255;
+    }
+    return out;
+  }
+
   // ── Main entry points ──────────────────────────────────────────
 
   /**
@@ -675,6 +795,7 @@
    *        - gridSize: [gridW, gridH] to override auto detection
    *        - refineIntensity: grid line search range as a cell fraction (default 0.25)
    *        - fixSquare: square up off-by-one outputs (default true)
+   *        - maxColors: quantize the result to at most this many colors (0/off by default)
    * @returns {Object|null} {width, height, image} or null when no grid detected
    */
   function getPerfectPixel(img, opts) {
@@ -710,6 +831,9 @@
 
     if (fixSquare) {
       scaled = fixSquareImage(scaled);
+    }
+    if (opts.maxColors > 0) {
+      scaled = quantizeImage(scaled, Math.round(opts.maxColors));
     }
     return { width: scaled.width, height: scaled.height, image: scaled };
   }
@@ -755,6 +879,7 @@
     getPerfectPixel: getPerfectPixel,
     detectGridScale: detectGridScale,
     refineGrids: refineGrids,
+    quantizeImage: quantizeImage,
     detect: typeof document !== 'undefined' ? detect : null,
     snapToCanvas: typeof document !== 'undefined' ? snapToCanvas : null
   };

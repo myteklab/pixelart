@@ -35,6 +35,14 @@
     { value: 'median', label: 'Median (softens noise)' }
   ];
 
+  var COLOR_LIMITS = [
+    { value: '0', label: 'All colors' },
+    { value: '8', label: '8' },
+    { value: '16', label: '16' },
+    { value: '32', label: '32' },
+    { value: '64', label: '64' }
+  ];
+
   function waitForPiskel() {
     pollCount++;
     if (pollCount > MAX_POLLS) {
@@ -73,8 +81,10 @@
       '.pp-snap-title { font-weight: bold; margin-left: 7px; }',
       '.pp-snap-status { font-size: 12px; color: gold; margin-left: 10px; text-align: right; }',
       '.pp-snap-explainer { font-size: 12px; opacity: 0.7; line-height: 1.5; margin: 6px 0 0 0; }',
-      '.pp-snap-method-row { margin-top: 8px; font-size: 12px; }',
+      '.pp-snap-method-row { margin-top: 8px; font-size: 12px; display: flex;',
+      '  align-items: center; flex-wrap: wrap; gap: 4px 18px; }',
       '.pp-snap-method-row select { font-size: 12px; margin-left: 6px; }',
+      '.pp-snap-option { display: flex; align-items: center; }',
       // Piskel styles ".import-section-preview canvas" as absolute (its grid
       // overlay); ours must stay in the flex flow to center in the box.
       '.import-section-preview canvas.pp-snap-preview-canvas { position: static;',
@@ -167,6 +177,10 @@
       return (this.pixelSnapMethod_ && this.pixelSnapMethod_.value) || 'majority';
     };
 
+    ImageImport.prototype.getSnapMaxColors_ = function () {
+      return parseInt((this.pixelSnapColors_ && this.pixelSnapColors_.value) || '0', 10) || 0;
+    };
+
     /** Grid size from the resize fields, or null when they cover the image 1:1. */
     ImageImport.prototype.getSnapGrid_ = function () {
       var gridW = parseInt(this.resizeWidth.value, 10);
@@ -190,6 +204,10 @@
      */
     ImageImport.prototype.getSnapOptions_ = function (grid) {
       var opts = { sampleMethod: this.getSnapMethod_() };
+      var maxColors = this.getSnapMaxColors_();
+      if (maxColors > 0) {
+        opts.maxColors = maxColors;
+      }
       if (grid) {
         opts.gridSize = grid;
       }
@@ -262,7 +280,7 @@
         return;
       }
       var method = this.getSnapMethod_();
-      var key = method + ':' + (grid ? grid[0] + 'x' + grid[1] : 'auto');
+      var key = method + ':' + this.getSnapMaxColors_() + ':' + (grid ? grid[0] + 'x' + grid[1] : 'auto');
       this.pixelSnapJob_ = key;
       var cached = this.pixelSnapCache_[key];
       if (cached) {
@@ -315,7 +333,9 @@
       wrap.appendChild(canvas);
       var caption = document.createElement('div');
       caption.className = 'pp-snap-preview-caption';
-      caption.textContent = snapped.width + '×' + snapped.height + ' pixels';
+      var maxColors = this.getSnapMaxColors_();
+      caption.textContent = snapped.width + '×' + snapped.height + ' pixels' +
+        (maxColors > 0 ? ', ' + maxColors + ' colors' : '');
       this.importPreview.appendChild(wrap);
       this.importPreview.appendChild(caption);
       var verb = snapped.refined ? 'snapped to ' : 'pixel art at ';
@@ -355,7 +375,7 @@
 
       var image = this.importedImage_;
       var method = this.getSnapMethod_();
-      var key = method + ':' + (grid ? grid[0] + 'x' + grid[1] : 'auto');
+      var key = method + ':' + this.getSnapMaxColors_() + ':' + (grid ? grid[0] + 'x' + grid[1] : 'auto');
       var cached = this.pixelSnapCache_[key];
       var opts = this.getSnapOptions_(grid);
       var self = this;
@@ -417,21 +437,32 @@
     explainer.className = 'pp-snap-explainer';
     explainer.textContent = EXPLAINER_TEXT;
 
+    function buildOption(labelText, selectName, choices) {
+      var holder = document.createElement('span');
+      holder.className = 'pp-snap-option';
+      var text = document.createElement('span');
+      text.textContent = labelText;
+      var select = document.createElement('select');
+      select.name = selectName;
+      choices.forEach(function (c) {
+        var option = document.createElement('option');
+        option.value = c.value;
+        option.textContent = c.label;
+        select.appendChild(option);
+      });
+      holder.appendChild(text);
+      holder.appendChild(select);
+      return { holder: holder, select: select };
+    }
+
     var methodRow = document.createElement('div');
     methodRow.className = 'pp-snap-method-row';
     methodRow.style.display = 'none';
-    var methodLabel = document.createElement('span');
-    methodLabel.textContent = 'Pick colors by';
-    var methodSelect = document.createElement('select');
-    methodSelect.name = 'pixel-snap-method';
-    SAMPLE_METHODS.forEach(function (m) {
-      var option = document.createElement('option');
-      option.value = m.value;
-      option.textContent = m.label;
-      methodSelect.appendChild(option);
-    });
-    methodRow.appendChild(methodLabel);
-    methodRow.appendChild(methodSelect);
+    var methodOption = buildOption('Pick colors by', 'pixel-snap-method', SAMPLE_METHODS);
+    var colorsOption = buildOption('Limit colors', 'pixel-snap-colors', COLOR_LIMITS);
+    var methodSelect = methodOption.select;
+    methodRow.appendChild(methodOption.holder);
+    methodRow.appendChild(colorsOption.holder);
 
     section.appendChild(titleRow);
     section.appendChild(explainer);
@@ -442,10 +473,12 @@
     step.pixelSnapCheckbox_ = checkbox;
     step.pixelSnapStatus_ = status;
     step.pixelSnapMethod_ = methodSelect;
+    step.pixelSnapColors_ = colorsOption.select;
     step.pixelSnapMethodRow_ = methodRow;
 
     step.addEventListener(checkbox, 'change', step.onPixelSnapChange_);
     step.addEventListener(methodSelect, 'change', step.updateSnapPreview_);
+    step.addEventListener(colorsOption.select, 'change', step.updateSnapPreview_);
     // Editing the size fields while snapping re-previews with that grid.
     step.addEventListener(step.resizeWidth, 'keyup', step.scheduleSnapPreview_);
     step.addEventListener(step.resizeHeight, 'keyup', step.scheduleSnapPreview_);
