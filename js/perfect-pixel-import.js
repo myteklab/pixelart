@@ -340,19 +340,37 @@
       this.importPreview.appendChild(wrap);
       this.importPreview.appendChild(caption);
 
-      // Press and hold the preview to compare with the original image.
+      // Press and hold the preview to compare with the original image. The
+      // original is overlaid at exactly the snapped canvas's display size and
+      // position, so the only thing that changes under the cursor is the
+      // pixelation itself.
       canvas.title = 'Press and hold to see the original';
       var endCompare = function () {
         window.removeEventListener('mouseup', endCompare);
         window.removeEventListener('touchend', endCompare);
-        if (img) { img.style.display = 'none'; }
-        wrap.style.display = '';
+        if (img) {
+          img.style.display = 'none';
+          ['position', 'left', 'top', 'transform', 'width', 'height',
+            'maxWidth', 'maxHeight', 'zIndex'].forEach(function (prop) {
+            img.style[prop] = '';
+          });
+        }
         caption.textContent = resultText;
       };
       var startCompare = function (evt) {
         evt.preventDefault();
-        if (img) { img.style.display = ''; }
-        wrap.style.display = 'none';
+        if (img) {
+          img.style.display = '';
+          img.style.position = 'absolute';
+          img.style.left = '50%';
+          img.style.top = '50%';
+          img.style.transform = 'translate(-50%, -50%)';
+          img.style.width = canvas.style.width;
+          img.style.height = canvas.style.height;
+          img.style.maxWidth = 'none';
+          img.style.maxHeight = 'none';
+          img.style.zIndex = '2';
+        }
         caption.textContent = 'original';
         window.addEventListener('mouseup', endCompare);
         window.addEventListener('touchend', endCompare);
