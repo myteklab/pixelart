@@ -326,6 +326,79 @@
   }
 
   /**
+   * Fast path for images that are already crisp pixel art. Such images have
+   * a small exact palette (AI/diffusion and photo sources have thousands of
+   * unique colors), and for them the cell size can be recovered exactly: a
+   * k-times nearest-neighbor upscale only changes color at multiples of k,
+   * so the GCD of all run boundary positions is k. Native-resolution art
+   * yields k = 1 and imports 1:1.
+   *
+   * The FFT detector assumes an upscaled source (cell size >= minSize) and
+   * on native-resolution art it latches onto content periodicity instead
+   * (a 64x64 medal badge with a laurel ring detected as 12x12 cells of
+   * 5.5px, destroying it). Crisp art must never reach the FFT.
+   *
+   * Returns {gridW, gridH, pixelSize} or null when the image is not crisp
+   * (or is a single flat color, where nothing can be inferred).
+   */
+  function detectCleanGrid(img, maxUnique) {
+    maxUnique = maxUnique || 512;
+    var W = img.width;
+    var H = img.height;
+    var d = img.data;
+    var n = W * H;
+    var seen = {};
+    var unique = 0;
+    for (var i = 0; i < n; i++) {
+      var o = i * 4;
+      // Fully transparent pixels count as one color whatever their RGB.
+      var key = d[o + 3] === 0 ? -1 : (d[o] * 16777216 + d[o + 1] * 65536 + d[o + 2] * 256 + d[o + 3]);
+      if (seen[key] === undefined) {
+        seen[key] = 1;
+        unique++;
+        if (unique > maxUnique) { return null; }
+      }
+    }
+
+    function gcd(a, b) { while (b) { var t = a % b; a = b; b = t; } return a; }
+    function samePx(a, b) {
+      var oa = a * 4;
+      var ob = b * 4;
+      if (d[oa + 3] === 0 && d[ob + 3] === 0) { return true; }
+      return d[oa] === d[ob] && d[oa + 1] === d[ob + 1] &&
+             d[oa + 2] === d[ob + 2] && d[oa + 3] === d[ob + 3];
+    }
+
+    var g = 0;
+    var x;
+    var y;
+    for (y = 0; y < H && g !== 1; y++) {
+      var row = y * W;
+      for (x = 1; x < W; x++) {
+        if (!samePx(row + x - 1, row + x)) {
+          g = g === 0 ? x : gcd(g, x);
+          if (g === 1) { break; }
+        }
+      }
+    }
+    for (x = 0; x < W && g !== 1; x++) {
+      for (y = 1; y < H; y++) {
+        if (!samePx((y - 1) * W + x, y * W + x)) {
+          g = g === 0 ? y : gcd(g, y);
+          if (g === 1) { break; }
+        }
+      }
+    }
+    if (g < 1) { return null; }
+    if (g > 1 && (W % g !== 0 || H % g !== 0)) {
+      // Sparse boundaries landed on a shared multiple; import 1:1 rather
+      // than guess a grid that does not tile the image.
+      g = 1;
+    }
+    return { gridW: Math.round(W / g), gridH: Math.round(H / g), pixelSize: g };
+  }
+
+  /**
    * Detect the pixel grid dimensions of an RGBA image.
    * Returns {gridW, gridH, pixelSize} or null if no grid could be found.
    */
@@ -339,6 +412,10 @@
 
     var W = img.width;
     var H = img.height;
+
+    var clean = detectCleanGrid(img, opts.maxUnique);
+    if (clean) { return clean; }
+
     var gray = rgbaToGray(img);
 
     var est = estimateGridFft(gray, W, H, peakWidth, maxCrop);
@@ -878,6 +955,7 @@
   var PerfectPixel = {
     getPerfectPixel: getPerfectPixel,
     detectGridScale: detectGridScale,
+    detectCleanGrid: detectCleanGrid,
     refineGrids: refineGrids,
     quantizeImage: quantizeImage,
     detect: typeof document !== 'undefined' ? detect : null,
