@@ -442,6 +442,13 @@
     };
 
     ImageImport.prototype.createPiskelFromImage = function () {
+      // Tell the wrapper an image import committed (any path: stock, snap,
+      // spritesheet). The platform records it on the project; the app knows
+      // nothing beyond firing a DOM event.
+      try {
+        document.dispatchEvent(new CustomEvent('pixelart:image-imported'));
+      } catch (e) { /* never block an import */ }
+
       var snapEnabled = this.pixelSnapCheckbox_ && this.pixelSnapCheckbox_.checked &&
         this.getImportType_() === 'single';
       var grid = snapEnabled ? this.getSnapGrid_() : null;
