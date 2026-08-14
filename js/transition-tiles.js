@@ -344,6 +344,21 @@
         }
       }
     }
+    // Faint cell grid, so an empty or sparse set still reads as a tile map.
+    ctx.strokeStyle = 'rgba(255,255,255,.18)';
+    ctx.lineWidth = 1;
+    for (var gx = 0; gx <= islandW; gx++) {
+      ctx.beginPath();
+      ctx.moveTo(gx * tw + 0.5, 0);
+      ctx.lineTo(gx * tw + 0.5, islandCanvas.height);
+      ctx.stroke();
+    }
+    for (var gy = 0; gy <= islandH; gy++) {
+      ctx.beginPath();
+      ctx.moveTo(0, gy * th + 0.5);
+      ctx.lineTo(islandCanvas.width, gy * th + 0.5);
+      ctx.stroke();
+    }
 
     // Sheet map: the raw 3x3, clickable.
     sheetCanvas.width = 3 * tw;
@@ -357,7 +372,19 @@
         sctx.drawImage(t, (i % 3) * tw, Math.floor(i / 3) * th, tw, th);
       }
     }
-    // Highlight the tile being edited.
+    // Cell grid, then highlight the tile being edited.
+    sctx.strokeStyle = 'rgba(255,255,255,.22)';
+    sctx.lineWidth = 1;
+    for (var sg = 0; sg <= 3; sg++) {
+      sctx.beginPath();
+      sctx.moveTo(sg * tw + 0.5, 0);
+      sctx.lineTo(sg * tw + 0.5, sheetCanvas.height);
+      sctx.stroke();
+      sctx.beginPath();
+      sctx.moveTo(0, sg * th + 0.5);
+      sctx.lineTo(sheetCanvas.width, sg * th + 0.5);
+      sctx.stroke();
+    }
     var rel = pc.getCurrentFrameIndex() - base;
     if (rel >= 0 && rel <= 8) {
       sctx.strokeStyle = '#ffd93d';
@@ -374,15 +401,13 @@
     panel = document.createElement('div');
     panel.id = 'tt-panel';
     panel.innerHTML =
-      '<div class="tt-title">Transition preview</div>' +
+      '<div class="tt-title-row"><span class="tt-title">Transition preview</span>' +
+      '<span class="tt-size" title="Island size in tiles"><input type="number" class="tt-w" min="3" max="12" step="1"> x ' +
+      '<input type="number" class="tt-h" min="3" max="12" step="1"></span></div>' +
       '<div class="tt-hint" style="display:none">This set needs 9 frames (it has <span class="tt-hint-count">0</span>). ' +
       'Each frame is one tile of the 3x3 set. <button type="button" class="tt-make-frames button">Add frames to finish this set</button></div>' +
       '<div class="tt-body">' +
-      '  <canvas class="tt-island"></canvas>' +
-      '  <div class="tt-controls">' +
-      '    <label>Island <input type="number" class="tt-w" min="3" max="12" step="1"> x ' +
-      '    <input type="number" class="tt-h" min="3" max="12" step="1"> tiles</label>' +
-      '  </div>' +
+      '  <canvas class="tt-island" title="Your tiles assembled as an island"></canvas>' +
       '  <div class="tt-sheet-row"><canvas class="tt-sheet" title="Click a tile to edit it"></canvas>' +
       '  <span class="tt-sheet-caption">the 9 tiles<br>(click to edit)</span></div>' +
       '</div>';
@@ -510,18 +535,22 @@
     var style = document.createElement('style');
     style.id = 'tt-styles';
     style.textContent = [
-      '#tt-panel { margin: 6px 0 0 0; padding: 6px 8px; background: #262626;',
+      '#tt-panel { margin: 6px 0 0 0; padding: 5px 8px 7px; background: #262626;',
       '  border: 1px solid #3d3d3d; border-radius: 3px; color: #b3b3b3; font-size: 12px; }',
-      '#tt-panel .tt-title { font-weight: bold; margin-bottom: 5px; color: #d3d3d3; }',
-      '#tt-panel .tt-island { display: block; width: 100%; image-rendering: pixelated;',
+      '#tt-panel .tt-title-row { display: flex; justify-content: space-between;',
+      '  align-items: center; margin-bottom: 4px; }',
+      '#tt-panel .tt-title { font-weight: bold; color: #d3d3d3; white-space: nowrap;',
+      '  overflow: hidden; text-overflow: ellipsis; margin-right: 6px; }',
+      '#tt-panel .tt-size { white-space: nowrap; flex-shrink: 0; }',
+      '#tt-panel .tt-size input { width: 30px; background: #333; color: #ddd;',
+      '  border: 1px solid #555; border-radius: 2px; padding: 0 2px; }',
+      '#tt-panel .tt-island { display: block; margin: 0 auto 5px; max-width: 100%;',
+      '  max-height: 110px; image-rendering: pixelated;',
       '  background-image: conic-gradient(#3a3a3a 25%, #2c2c2c 0 50%, #3a3a3a 0 75%, #2c2c2c 0);',
       '  background-size: 12px 12px; border: 1px solid #3d3d3d; }',
-      '#tt-panel .tt-controls { margin: 5px 0; }',
-      '#tt-panel .tt-controls input { width: 38px; background: #333; color: #ddd;',
-      '  border: 1px solid #555; border-radius: 2px; padding: 1px 3px; }',
       '#tt-panel .tt-sheet-row { display: flex; align-items: center; gap: 8px; }',
-      '#tt-panel .tt-sheet { width: 60%; image-rendering: pixelated; cursor: pointer;',
-      '  border: 1px solid #3d3d3d; }',
+      '#tt-panel .tt-sheet { height: 72px; width: auto; image-rendering: pixelated;',
+      '  cursor: pointer; border: 1px solid #3d3d3d; }',
       '#tt-panel .tt-sheet-caption { font-size: 10px; color: #888; }',
       '#tt-panel .tt-hint { color: #c9a53d; }',
       '#tt-panel .tt-make-frames { margin-top: 4px; font-size: 11px; }',
@@ -541,6 +570,13 @@
       if (isEnabled()) {
         renderIsland(true);
       }
+    }
+    // The panel REPLACES the animated preview while the mode is on: an
+    // animation preview is meaningless flicker for a tileset project, and
+    // stacking both overflows the right column.
+    var ap = document.getElementById('animated-preview-container');
+    if (ap) {
+      ap.style.display = isEnabled() ? 'none' : '';
     }
     badgeFrameList();
   }
@@ -568,6 +604,10 @@
       }
       if (panel) {
         panel.style.display = isEnabled() ? 'block' : 'none';
+      }
+      var ap = document.getElementById('animated-preview-container');
+      if (ap) {
+        ap.style.display = isEnabled() ? 'none' : '';
       }
       badgeFrameList();
       if (!isEnabled()) {
