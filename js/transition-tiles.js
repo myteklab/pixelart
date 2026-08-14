@@ -52,6 +52,13 @@
     }
     syncUi();
     $.publish(Events.PISKEL_RESET);
+    if (on) {
+      fitSheet();
+    } else {
+      lastPos = null;
+      // Hand the camera back to piskel in a legal state.
+      try { pskl.app.drawingController.setOffset(0, 0); } catch (e) {}
+    }
   }
 
   function controller() {
@@ -128,6 +135,12 @@
       // activity) leaves the previous tile's neighbors painted on top.
       var cls = (this && this.displayCanvas && this.displayCanvas.className) || '';
       if (cls.indexOf('drawing-canvas') === -1) {
+        // Companion renderers (tool overlay, layer composites, onion skin)
+        // draw no neighbors, but they MUST punch the same wide window: when
+        // zoomed out each renderer fills its whole canvas with the opaque
+        // background color and only clears one tile around the frame, which
+        // would occlude the sheet drawn on the canvas underneath.
+        context.clearRect(-4 * w * z, -4 * h * z, 9 * w * z, 9 * h * z);
         return;
       }
 
@@ -139,7 +152,7 @@
       var col = cur % 3;
       var row = Math.floor(cur / 3);
       var opacity = pskl.utils.Math.minmax(pskl.UserSettings.get('SEAMLESS_OPACITY'), 0, 1);
-      context.clearRect(-2 * w * z, -2 * h * z, 5 * w * z, 5 * h * z);
+      context.clearRect(-4 * w * z, -4 * h * z, 9 * w * z, 9 * h * z);
       context.fillStyle = 'rgba(255, 255, 255, ' + opacity + ')';
 
       for (var i = 0; i < 9; i++) {
@@ -156,6 +169,105 @@
         context.fillRect(dx * w * z, dy * h * z, w * z, h * z);
       }
     };
+  }
+
+  // ── Camera: keep the sheet pinned on screen ────────────────────
+  // The whole point of the mode is that all 9 tiles sit in FIXED positions
+  // on screen and selecting a frame only changes which cell is live. Piskel
+  // keeps the editable canvas wherever the camera puts it, so we drive the
+  // camera: fit the sheet on enable, then on every frame switch shift the
+  // offset by exactly the tile delta so the sheet does not move at all.
+
+  var lastPos = null; // sheet position of the previously edited tile
+
+  function cameraActive() {
+    var pc = controller();
+    return isEnabled() && pc && pc.getFrameCount() >= 9 && pc.getCurrentFrameIndex() <= 8;
+  }
+
+  function patchOffsetClamp() {
+    var FrameRenderer = pskl.rendering.frame.FrameRenderer;
+    var original = FrameRenderer.prototype.setOffset;
+    FrameRenderer.prototype.setOffset = function (x, y) {
+      if (!cameraActive()) {
+        return original.call(this, x, y);
+      }
+      // The sheet extends up to two tiles beyond the frame; the stock clamp
+      // pins offsets to the frame itself and would forbid showing it. Allow
+      // the camera anywhere that keeps the sheet within reach of the
+      // viewport (viewport size in sprite pixels = display / zoom).
+      var pc = controller();
+      var w = pc.getWidth();
+      var h = pc.getHeight();
+      var vw = this.displayWidth / this.zoom;
+      var vh = this.displayHeight / this.zoom;
+      this.offset.x = pskl.utils.Math.minmax(x, -(2 * w + vw), 3 * w + vw);
+      this.offset.y = pskl.utils.Math.minmax(y, -(2 * h + vh), 3 * h + vh);
+    };
+  }
+
+  function drawingContainerRect() {
+    var el = document.getElementById('drawing-canvas-container');
+    return el ? el.getBoundingClientRect() : null;
+  }
+
+  function fitSheet() {
+    var pc = controller();
+    var dc = pskl.app.drawingController;
+    var rect = drawingContainerRect();
+    if (!cameraActive() || !dc || !rect || !rect.width) {
+      return;
+    }
+    var w = pc.getWidth();
+    var h = pc.getHeight();
+    // 3 tiles plus breathing room on each side. Zoom the WHOLE renderer
+    // stack (composite), never a single canvas, or margins diverge and the
+    // stacked canvases stop lining up.
+    var zoom = Math.max(1, Math.min(rect.width / (w * 3.4), rect.height / (h * 3.4)));
+    if (dc.setZoom_) {
+      dc.setZoom_(zoom);
+    } else {
+      dc.compositeRenderer.setZoom(zoom);
+    }
+    centerSheet();
+  }
+
+  function centerSheet() {
+    var pc = controller();
+    var dc = pskl.app.drawingController;
+    var rect = drawingContainerRect();
+    if (!cameraActive() || !dc || !rect || !rect.width) {
+      return;
+    }
+    var w = pc.getWidth();
+    var h = pc.getHeight();
+    var cur = pc.getCurrentFrameIndex();
+    var col = cur % 3;
+    var row = Math.floor(cur / 3);
+    // Piskel centers the FRAME on screen when offset is 0 (margin term), so
+    // centering the SHEET reduces to: offset = sheetCenter - frameCenter,
+    // which is ((1-col)*w, (1-row)*h). Independent of zoom and viewport.
+    dc.setOffset((1 - col) * w, (1 - row) * h);
+    lastPos = { col: col, row: row };
+  }
+
+  function trackFrameChange() {
+    if (!cameraActive()) {
+      lastPos = null;
+      return;
+    }
+    var pc = controller();
+    var cur = pc.getCurrentFrameIndex();
+    var col = cur % 3;
+    var row = Math.floor(cur / 3);
+    if (lastPos && lastPos.col === col && lastPos.row === row) {
+      return;
+    }
+    // Re-center the sheet at the current zoom on every tile switch. The
+    // sheet lands in the identical screen position each time, so only the
+    // live cell appears to change. Centering (rather than delta-shifting)
+    // is drift-proof: no dependence on the previous camera state.
+    centerSheet();
   }
 
   // ── 2. Island preview panel ────────────────────────────────────
@@ -296,6 +408,7 @@
       pc.setCurrentFrameIndex(0);
       renderIsland(true);
       badgeFrameList();
+      fitSheet();
     });
 
     syncUi();
@@ -415,6 +528,7 @@
         if (!isEnabled()) {
           return;
         }
+        trackFrameChange();
         renderIsland(false);
         badgeFrameList();
       });
@@ -434,6 +548,7 @@
       if (!isEnabled()) {
         return;
       }
+      trackFrameChange();
       renderIsland(false);
       maybePrefillExport();
     }, 700);
@@ -452,9 +567,12 @@
     if (ready) {
       injectStyles();
       patchTiledFrames();
+      patchOffsetClamp();
       buildPanel();
       subscribeAll();
       syncUi();
+      // Booting straight into an existing 9-tile project: start in sheet view.
+      setTimeout(fitSheet, 600);
     } else {
       setTimeout(waitForPiskel, POLL_INTERVAL);
     }
