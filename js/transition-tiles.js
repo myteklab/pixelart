@@ -52,6 +52,7 @@
       fitSheet();
     } else {
       lastPos = null;
+      wasActive = false;
       // Hand the camera back to piskel in a legal state.
       try { pskl.app.drawingController.setOffset(0, 0); } catch (e) {}
     }
@@ -191,10 +192,11 @@
   // The whole point of the mode is that all 9 tiles sit in FIXED positions
   // on screen and selecting a frame only changes which cell is live. Piskel
   // keeps the editable canvas wherever the camera puts it, so we drive the
-  // camera: fit the sheet on enable, then on every frame switch shift the
-  // offset by exactly the tile delta so the sheet does not move at all.
+  // camera: fit the sheet when the mode becomes active, then re-center on
+  // every frame switch so the sheet lands in the identical screen rect.
 
-  var lastPos = null; // sheet position of the previously edited tile
+  var lastPos = null;     // sheet position of the previously edited tile
+  var wasActive = false;  // detects activation edges (project load, undo, etc.)
 
   function cameraActive() {
     var pc = controller();
@@ -268,8 +270,25 @@
   }
 
   function trackFrameChange() {
-    if (!cameraActive()) {
+    var active = cameraActive();
+    if (!active) {
       lastPos = null;
+      if (wasActive) {
+        // Mode just deactivated (undo below 9 frames, or the kid selected a
+        // frame in an incomplete bank): hand the camera back in a legal
+        // state instead of leaving a sheet-view offset behind.
+        wasActive = false;
+        try { pskl.app.drawingController.setOffset(0, 0); } catch (e) {}
+      }
+      return;
+    }
+    if (!wasActive) {
+      // Mode just became active. This is how the sheet view engages when a
+      // saved project finishes loading (the platform adapter sets the
+      // piskel asynchronously, well after boot), when a set gets its 9th
+      // frame, or after a redo.
+      wasActive = true;
+      fitSheet();
       return;
     }
     var pc = controller();
@@ -482,9 +501,6 @@
       '  align-items: center; margin-bottom: 4px; }',
       '#tt-panel .tt-title { font-weight: bold; color: #d3d3d3; white-space: nowrap;',
       '  overflow: hidden; text-overflow: ellipsis; margin-right: 6px; }',
-      '#tt-panel .tt-size { white-space: nowrap; flex-shrink: 0; }',
-      '#tt-panel .tt-size input { width: 30px; background: #333; color: #ddd;',
-      '  border: 1px solid #555; border-radius: 2px; padding: 0 2px; }',
       '#tt-panel .tt-sheet { display: block; margin: 0 auto; max-width: 100%;',
       '  max-height: 160px; image-rendering: pixelated; cursor: pointer;',
       '  background-image: conic-gradient(#3a3a3a 25%, #2c2c2c 0 50%, #3a3a3a 0 75%, #2c2c2c 0);',
