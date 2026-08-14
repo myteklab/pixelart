@@ -1,11 +1,12 @@
 /**
  * transition-tiles.js - Transition tileset (3x3) support for the frames-as-tiles workflow.
  *
- * When enabled, frames 1-9 are treated as a 3x3 transition set:
+ * When enabled, frames are grouped into BANKS of 9, and each complete bank
+ * is a 3x3 transition set (a project can hold several sets):
  *
  *   frame 1  frame 2  frame 3        TL  T  TR
- *   frame 4  frame 5  frame 6   =>   L   C  R
- *   frame 7  frame 8  frame 9        BL  B  BR
+ *   frame 4  frame 5  frame 6   =>   L   C  R      (set 1; frames 10-18
+ *   frame 7  frame 8  frame 9        BL  B  BR      are set 2, and so on)
  *
  * Three additions, all render-only (no data model or export changes):
  *  1. Edit in context: in tile mode, the full 3x3 sheet is rendered around
@@ -65,9 +66,25 @@
     return pskl.app && pskl.app.piskelController;
   }
 
-  function hasFullSet() {
+  // Banks: frames [9k, 9k+8] form transition set k. A frame participates
+  // only when its whole bank exists; a trailing partial bank keeps stock
+  // behavior until it is filled out.
+  function bankBase(frameIndex) {
+    return Math.floor(frameIndex / 9) * 9;
+  }
+
+  function bankComplete(base) {
     var pc = controller();
-    return !!pc && pc.getFrameCount() >= 9;
+    return !!pc && pc.getFrameCount() >= base + 9;
+  }
+
+  function currentBase() {
+    var pc = controller();
+    return pc ? bankBase(pc.getCurrentFrameIndex()) : 0;
+  }
+
+  function hasFullSet() {
+    return bankComplete(currentBase());
   }
 
   // ── Frame render cache ─────────────────────────────────────────
@@ -89,7 +106,7 @@
 
   function tileCanvas(index) {
     var pc = controller();
-    if (!pc || index < 0 || index > 8 || index >= pc.getFrameCount()) {
+    if (!pc || index < 0 || index >= pc.getFrameCount()) {
       return null;
     }
     var hash = frameHash(index);
@@ -101,9 +118,9 @@
     return entry.canvas;
   }
 
-  function setHash() {
-    var h = '';
-    for (var i = 0; i < 9; i++) {
+  function setHash(base) {
+    var h = String(base) + '|';
+    for (var i = base; i < base + 9; i++) {
       h += frameHash(i);
     }
     return h + '|' + islandW + 'x' + islandH;
@@ -117,13 +134,14 @@
 
     FrameRenderer.prototype.drawTiledFrames_ = function (context, image, w, h, z) {
       var pc = controller();
-      if (!isEnabled() || !pc || pc.getFrameCount() < 9) {
+      if (!isEnabled() || !pc) {
         return original.call(this, context, image, w, h, z);
       }
       var cur = pc.getCurrentFrameIndex();
-      if (cur > 8) {
-        // Frames beyond the transition set keep stock behavior (plain tiling),
-        // so extra tiles (variants, decorations) work exactly as before.
+      var base = bankBase(cur);
+      if (!bankComplete(base)) {
+        // Frames of an incomplete bank keep stock behavior (plain tiling),
+        // so stray extra tiles work exactly as before the mode existed.
         return original.call(this, context, image, w, h, z);
       }
 
@@ -149,19 +167,19 @@
       // tile is ever missing; only which cell is editable moves. Offsets can
       // reach two tiles out (editing a corner), so clear that whole region
       // first: the stock clear only covers one tile around the canvas.
-      var col = cur % 3;
-      var row = Math.floor(cur / 3);
+      var col = (cur - base) % 3;
+      var row = Math.floor((cur - base) / 3);
       var opacity = pskl.utils.Math.minmax(pskl.UserSettings.get('SEAMLESS_OPACITY'), 0, 1);
       context.clearRect(-4 * w * z, -4 * h * z, 9 * w * z, 9 * h * z);
       context.fillStyle = 'rgba(255, 255, 255, ' + opacity + ')';
 
       for (var i = 0; i < 9; i++) {
-        if (i === cur) {
+        if (base + i === cur) {
           continue; // the live canvas draws itself
         }
         var dx = (i % 3) - col;
         var dy = Math.floor(i / 3) - row;
-        var neighbor = tileCanvas(i);
+        var neighbor = tileCanvas(base + i);
         if (!neighbor) {
           continue;
         }
@@ -182,7 +200,7 @@
 
   function cameraActive() {
     var pc = controller();
-    return isEnabled() && pc && pc.getFrameCount() >= 9 && pc.getCurrentFrameIndex() <= 8;
+    return isEnabled() && !!pc && bankComplete(currentBase());
   }
 
   function patchOffsetClamp() {
@@ -241,9 +259,9 @@
     }
     var w = pc.getWidth();
     var h = pc.getHeight();
-    var cur = pc.getCurrentFrameIndex();
-    var col = cur % 3;
-    var row = Math.floor(cur / 3);
+    var rel = pc.getCurrentFrameIndex() - currentBase();
+    var col = rel % 3;
+    var row = Math.floor(rel / 3);
     // Piskel centers the FRAME on screen when offset is 0 (margin term), so
     // centering the SHEET reduces to: offset = sheetCenter - frameCenter,
     // which is ((1-col)*w, (1-row)*h). Independent of zoom and viewport.
@@ -257,9 +275,9 @@
       return;
     }
     var pc = controller();
-    var cur = pc.getCurrentFrameIndex();
-    var col = cur % 3;
-    var row = Math.floor(cur / 3);
+    var rel = pc.getCurrentFrameIndex() - currentBase();
+    var col = rel % 3;
+    var row = Math.floor(rel / 3);
     if (lastPos && lastPos.col === col && lastPos.row === row) {
       return;
     }
@@ -290,16 +308,20 @@
     var pc = controller();
     var hint = panel.querySelector('.tt-hint');
     var body = panel.querySelector('.tt-body');
+    var base = pc ? currentBase() : 0;
     if (!pc || !hasFullSet()) {
       hint.style.display = 'block';
       body.style.display = 'none';
-      hint.querySelector('.tt-hint-count').textContent = pc ? pc.getFrameCount() : 0;
+      var have = pc ? Math.min(9, pc.getFrameCount() - base) : 0;
+      hint.querySelector('.tt-hint-count').textContent = have;
       return;
     }
     hint.style.display = 'none';
     body.style.display = 'block';
+    panel.querySelector('.tt-title').textContent =
+      'Transition preview' + (base > 0 ? ' (set ' + (base / 9 + 1) + ')' : '');
 
-    var hash = setHash();
+    var hash = setHash(base);
     if (!force && hash === lastRenderHash) {
       return;
     }
@@ -316,7 +338,7 @@
     ctx.clearRect(0, 0, islandCanvas.width, islandCanvas.height);
     for (var y = 0; y < islandH; y++) {
       for (var x = 0; x < islandW; x++) {
-        var tile = tileCanvas(tileIndexForCell(x, y, islandW, islandH));
+        var tile = tileCanvas(base + tileIndexForCell(x, y, islandW, islandH));
         if (tile) {
           ctx.drawImage(tile, x * tw, y * th, tw, th);
         }
@@ -330,17 +352,17 @@
     sctx.imageSmoothingEnabled = false;
     sctx.clearRect(0, 0, sheetCanvas.width, sheetCanvas.height);
     for (var i = 0; i < 9; i++) {
-      var t = tileCanvas(i);
+      var t = tileCanvas(base + i);
       if (t) {
         sctx.drawImage(t, (i % 3) * tw, Math.floor(i / 3) * th, tw, th);
       }
     }
     // Highlight the tile being edited.
-    var cur = pc.getCurrentFrameIndex();
-    if (cur <= 8) {
+    var rel = pc.getCurrentFrameIndex() - base;
+    if (rel >= 0 && rel <= 8) {
       sctx.strokeStyle = '#ffd93d';
       sctx.lineWidth = Math.max(1, Math.round(tw / 16));
-      sctx.strokeRect((cur % 3) * tw + 0.5, Math.floor(cur / 3) * th + 0.5, tw - 1, th - 1);
+      sctx.strokeRect((rel % 3) * tw + 0.5, Math.floor(rel / 3) * th + 0.5, tw - 1, th - 1);
     }
   }
 
@@ -353,8 +375,8 @@
     panel.id = 'tt-panel';
     panel.innerHTML =
       '<div class="tt-title">Transition preview</div>' +
-      '<div class="tt-hint" style="display:none">Needs 9 frames (you have <span class="tt-hint-count">0</span>). ' +
-      'Each frame is one tile of the 3x3 set. <button type="button" class="tt-make-frames button">Add frames up to 9</button></div>' +
+      '<div class="tt-hint" style="display:none">This set needs 9 frames (it has <span class="tt-hint-count">0</span>). ' +
+      'Each frame is one tile of the 3x3 set. <button type="button" class="tt-make-frames button">Add frames to finish this set</button></div>' +
       '<div class="tt-body">' +
       '  <canvas class="tt-island"></canvas>' +
       '  <div class="tt-controls">' +
@@ -394,7 +416,7 @@
       var r = Math.floor((evt.clientY - rect.top) / (rect.height / 3));
       c = pskl.utils.Math.minmax(c, 0, 2);
       r = pskl.utils.Math.minmax(r, 0, 2);
-      pc.setCurrentFrameIndex(r * 3 + c);
+      pc.setCurrentFrameIndex(currentBase() + r * 3 + c);
     });
 
     panel.querySelector('.tt-make-frames').addEventListener('click', function () {
@@ -402,10 +424,11 @@
       if (!pc) {
         return;
       }
-      while (pc.getFrameCount() < 9) {
+      var base = currentBase();
+      while (pc.getFrameCount() < base + 9) {
         pc.addFrame();
       }
-      pc.setCurrentFrameIndex(0);
+      pc.setCurrentFrameIndex(base);
       renderIsland(true);
       badgeFrameList();
       fitSheet();
@@ -424,13 +447,14 @@
     var tiles = list.querySelectorAll('.preview-tile');
     for (var i = 0; i < tiles.length; i++) {
       var badge = tiles[i].querySelector('.tt-badge');
-      if (isEnabled() && i < 9) {
+      if (isEnabled() && bankComplete(bankBase(i))) {
         if (!badge) {
           badge = document.createElement('span');
           badge.className = 'tt-badge';
           tiles[i].appendChild(badge);
         }
-        badge.textContent = LABELS[i];
+        var setNo = Math.floor(i / 9) + 1;
+        badge.textContent = LABELS[i % 9] + (setNo > 1 ? setNo : '');
       } else if (badge) {
         badge.parentNode.removeChild(badge);
       }
