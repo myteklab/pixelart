@@ -45,6 +45,7 @@
     if (on) {
       // Context drawing rides on tile mode, so switch it on too.
       pskl.UserSettings.set(pskl.UserSettings.SEAMLESS_MODE, true);
+      markNotAnimation();
     }
     syncUi();
     $.publish(Events.PISKEL_RESET);
@@ -60,6 +61,17 @@
 
   function controller() {
     return pskl.app && pskl.app.piskelController;
+  }
+
+  // Platform convention: FPS 0 means "this is a tileset, not an animation".
+  // Previews (project card and share page) render the frames as a contact
+  // sheet instead of animating when FPS is 0. Tileset intent is explicit
+  // here, so set it on the kid's behalf.
+  function markNotAnimation() {
+    var pc = controller();
+    if (pc && pc.getFPS() > 0) {
+      pc.setFPS(0);
+    }
   }
 
   // Banks: frames [9k, 9k+8] form transition set k. A frame participates
@@ -414,6 +426,7 @@
         pc.addFrame();
       }
       pc.setCurrentFrameIndex(base);
+      markNotAnimation();
       renderSheet(true);
       badgeFrameList();
       fitSheet();
@@ -461,7 +474,11 @@
       '</label>' +
       '<div class="preferences-description">Every 9 frames form one set (frames 1-9, 10-18, and so on). ' +
       'Shows the whole set around the canvas while you draw, adds a set preview, and labels each tile. ' +
-      'Turns on tile mode.</div>';
+      'Turns on tile mode.</div>' +
+      '<div class="preferences-description tt-fps-note">Also sets the animation FPS to 0. ' +
+      'FPS 0 tells the gallery this project is a tileset, so previews show your tiles laid out ' +
+      'as a sheet instead of playing them like a flipbook. Set FPS above 0 to make it an ' +
+      'animation again.</div>';
     tilePanel.appendChild(div);
     var box = div.querySelector('.tt-enable-checkbox');
     box.checked = isEnabled();
