@@ -470,12 +470,13 @@
     var div = document.createElement('div');
     div.className = 'tt-settings';
     div.innerHTML =
-      '<div class="preferences-hint">Transition set</div>' +
+      '<div class="preferences-hint">Transition sets</div>' +
       '<label class="preferences-checkbox-label">' +
-      '  <input type="checkbox" class="tt-enable-checkbox"> Frames 1-9 form a 3x3 transition tileset' +
+      '  <input type="checkbox" class="tt-enable-checkbox"> Group frames into 3x3 transition tilesets' +
       '</label>' +
-      '<div class="preferences-description">Shows neighboring tiles around the canvas while you draw, ' +
-      'adds an island preview, and labels the first 9 frames. Turns on tile mode.</div>';
+      '<div class="preferences-description">Every 9 frames form one set (frames 1-9, 10-18, and so on). ' +
+      'Shows the whole set around the canvas while you draw, adds an island preview, and labels each tile. ' +
+      'Turns on tile mode.</div>';
     tilePanel.appendChild(div);
     var box = div.querySelector('.tt-enable-checkbox');
     box.checked = isEnabled();
