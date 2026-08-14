@@ -12,9 +12,8 @@
  *  1. Edit in context: in tile mode, the full 3x3 sheet is rendered around
  *     the drawing area in its fixed arrangement, with the tile being edited
  *     live in its own slot, so every seam is visible while drawing.
- *  2. Island preview: a panel that assembles an N x M rectangle island from
- *     the 9 tiles (corners, repeated edges, filled center), plus a clickable
- *     3x3 sheet map for jumping between tiles.
+ *  2. Sheet preview: a clickable 3x3 map of the set for jumping between
+ *     tiles, with the edited tile highlighted.
  *  3. Frame badges: TL/T/TR/... labels on the frame list so tile identity
  *     survives visually even though it is carried by frame order.
  *
@@ -34,11 +33,6 @@
 
   var STORAGE_KEY = 'pixelart-transition-tiles';
   var LABELS = ['TL', 'T', 'TR', 'L', 'C', 'R', 'BL', 'B', 'BR'];
-
-  // Island preview dimensions in tiles. Fixed: 5x4 already shows every
-  // repetition case (corners, three-tile edge runs, filled interior).
-  var islandW = 5;
-  var islandH = 4;
 
   var exportPrefilled = false;
 
@@ -127,7 +121,7 @@
     for (var i = base; i < base + 9; i++) {
       h += frameHash(i);
     }
-    return h + '|' + islandW + 'x' + islandH;
+    return h;
   }
 
   // ── 1. Edit in context: patch the seamless renderer ────────────
@@ -292,20 +286,13 @@
     centerSheet();
   }
 
-  // ── 2. Island preview panel ────────────────────────────────────
+  // ── 2. Sheet preview panel (the clickable 3x3 map) ─────────────
 
   var panel = null;
-  var islandCanvas = null;
   var sheetCanvas = null;
   var lastRenderHash = '';
 
-  function tileIndexForCell(x, y, w, h) {
-    var c = x === 0 ? 0 : (x === w - 1 ? 2 : 1);
-    var r = y === 0 ? 0 : (y === h - 1 ? 2 : 1);
-    return r * 3 + c;
-  }
-
-  function renderIsland(force) {
+  function renderSheet(force) {
     if (!panel || panel.style.display === 'none') {
       return;
     }
@@ -333,36 +320,6 @@
 
     var tw = pc.getCurrentFrame().getWidth();
     var th = pc.getCurrentFrame().getHeight();
-
-    // Island: corners at corners, edges repeated along runs, center filling.
-    islandCanvas.width = islandW * tw;
-    islandCanvas.height = islandH * th;
-    var ctx = islandCanvas.getContext('2d');
-    ctx.imageSmoothingEnabled = false;
-    ctx.clearRect(0, 0, islandCanvas.width, islandCanvas.height);
-    for (var y = 0; y < islandH; y++) {
-      for (var x = 0; x < islandW; x++) {
-        var tile = tileCanvas(base + tileIndexForCell(x, y, islandW, islandH));
-        if (tile) {
-          ctx.drawImage(tile, x * tw, y * th, tw, th);
-        }
-      }
-    }
-    // Faint cell grid, so an empty or sparse set still reads as a tile map.
-    ctx.strokeStyle = 'rgba(255,255,255,.18)';
-    ctx.lineWidth = 1;
-    for (var gx = 0; gx <= islandW; gx++) {
-      ctx.beginPath();
-      ctx.moveTo(gx * tw + 0.5, 0);
-      ctx.lineTo(gx * tw + 0.5, islandCanvas.height);
-      ctx.stroke();
-    }
-    for (var gy = 0; gy <= islandH; gy++) {
-      ctx.beginPath();
-      ctx.moveTo(0, gy * th + 0.5);
-      ctx.lineTo(islandCanvas.width, gy * th + 0.5);
-      ctx.stroke();
-    }
 
     // Sheet map: the raw 3x3, clickable.
     sheetCanvas.width = 3 * tw;
@@ -409,13 +366,10 @@
       '<div class="tt-hint" style="display:none">This set needs 9 frames (it has <span class="tt-hint-count">0</span>). ' +
       'Each frame is one tile of the 3x3 set. <button type="button" class="tt-make-frames button">Add frames to finish this set</button></div>' +
       '<div class="tt-body">' +
-      '  <canvas class="tt-island" title="Your tiles assembled as an island"></canvas>' +
-      '  <div class="tt-sheet-row"><canvas class="tt-sheet" title="Click a tile to edit it"></canvas>' +
-      '  <span class="tt-sheet-caption">the 9 tiles<br>(click to edit)</span></div>' +
+      '  <canvas class="tt-sheet" title="Click a tile to edit it"></canvas>' +
       '</div>';
     host.parentNode.insertBefore(panel, host.nextSibling);
 
-    islandCanvas = panel.querySelector('.tt-island');
     sheetCanvas = panel.querySelector('.tt-sheet');
 
     sheetCanvas.addEventListener('click', function (evt) {
@@ -441,7 +395,7 @@
         pc.addFrame();
       }
       pc.setCurrentFrameIndex(base);
-      renderIsland(true);
+      renderSheet(true);
       badgeFrameList();
       fitSheet();
     });
@@ -487,7 +441,7 @@
       '  <input type="checkbox" class="tt-enable-checkbox"> Group frames into 3x3 transition tilesets' +
       '</label>' +
       '<div class="preferences-description">Every 9 frames form one set (frames 1-9, 10-18, and so on). ' +
-      'Shows the whole set around the canvas while you draw, adds an island preview, and labels each tile. ' +
+      'Shows the whole set around the canvas while you draw, adds a set preview, and labels each tile. ' +
       'Turns on tile mode.</div>';
     tilePanel.appendChild(div);
     var box = div.querySelector('.tt-enable-checkbox');
@@ -531,14 +485,10 @@
       '#tt-panel .tt-size { white-space: nowrap; flex-shrink: 0; }',
       '#tt-panel .tt-size input { width: 30px; background: #333; color: #ddd;',
       '  border: 1px solid #555; border-radius: 2px; padding: 0 2px; }',
-      '#tt-panel .tt-island { display: block; margin: 0 auto 5px; max-width: 100%;',
-      '  max-height: 110px; image-rendering: pixelated;',
+      '#tt-panel .tt-sheet { display: block; margin: 0 auto; max-width: 100%;',
+      '  max-height: 160px; image-rendering: pixelated; cursor: pointer;',
       '  background-image: conic-gradient(#3a3a3a 25%, #2c2c2c 0 50%, #3a3a3a 0 75%, #2c2c2c 0);',
       '  background-size: 12px 12px; border: 1px solid #3d3d3d; }',
-      '#tt-panel .tt-sheet-row { display: flex; align-items: center; gap: 8px; }',
-      '#tt-panel .tt-sheet { height: 72px; width: auto; image-rendering: pixelated;',
-      '  cursor: pointer; border: 1px solid #3d3d3d; }',
-      '#tt-panel .tt-sheet-caption { font-size: 10px; color: #888; }',
       '#tt-panel .tt-hint { color: #c9a53d; }',
       '#tt-panel .tt-make-frames { margin-top: 4px; font-size: 11px; }',
       '.preview-tile { position: relative; }',
@@ -555,7 +505,7 @@
     if (panel) {
       panel.style.display = isEnabled() ? 'block' : 'none';
       if (isEnabled()) {
-        renderIsland(true);
+        renderSheet(true);
       }
     }
     // The panel REPLACES the animated preview while the mode is on: an
@@ -577,7 +527,7 @@
           return;
         }
         trackFrameChange();
-        renderIsland(false);
+        renderSheet(false);
         badgeFrameList();
       });
     });
@@ -601,7 +551,7 @@
         return;
       }
       trackFrameChange();
-      renderIsland(false);
+      renderSheet(false);
       maybePrefillExport();
     }, 700);
   }
