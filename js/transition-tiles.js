@@ -8,9 +8,9 @@
  *   frame 7  frame 8  frame 9        BL  B  BR
  *
  * Three additions, all render-only (no data model or export changes):
- *  1. Edit in context: in tile mode, the 8 canvases around the drawing area
- *     show the NEIGHBORING TILES from the sheet instead of copies of the
- *     current frame, so seams are visible while drawing.
+ *  1. Edit in context: in tile mode, the full 3x3 sheet is rendered around
+ *     the drawing area in its fixed arrangement, with the tile being edited
+ *     live in its own slot, so every seam is visible while drawing.
  *  2. Island preview: a panel that assembles an N x M rectangle island from
  *     the 9 tiles (corners, repeated edges, filled center), plus a clickable
  *     3x3 sheet map for jumping between tiles.
@@ -131,25 +131,30 @@
         return;
       }
 
+      // Draw the WHOLE 3x3 sheet in its fixed arrangement, with the tile
+      // being edited live in its own slot. The layout never changes and no
+      // tile is ever missing; only which cell is editable moves. Offsets can
+      // reach two tiles out (editing a corner), so clear that whole region
+      // first: the stock clear only covers one tile around the canvas.
       var col = cur % 3;
       var row = Math.floor(cur / 3);
       var opacity = pskl.utils.Math.minmax(pskl.UserSettings.get('SEAMLESS_OPACITY'), 0, 1);
+      context.clearRect(-2 * w * z, -2 * h * z, 5 * w * z, 5 * h * z);
       context.fillStyle = 'rgba(255, 255, 255, ' + opacity + ')';
 
-      [[0, -1], [0, 1], [-1, -1], [-1, 0], [-1, 1], [1, -1], [1, 0], [1, 1]].forEach(function (d) {
-        var cc = col + d[0];
-        var rr = row + d[1];
-        if (cc < 0 || cc > 2 || rr < 0 || rr > 2) {
-          // Outside the 3x3 sheet = outside the island. Leave it empty.
-          return;
+      for (var i = 0; i < 9; i++) {
+        if (i === cur) {
+          continue; // the live canvas draws itself
         }
-        var neighbor = tileCanvas(rr * 3 + cc);
+        var dx = (i % 3) - col;
+        var dy = Math.floor(i / 3) - row;
+        var neighbor = tileCanvas(i);
         if (!neighbor) {
-          return;
+          continue;
         }
-        context.drawImage(neighbor, d[0] * w * z, d[1] * h * z, w * z, h * z);
-        context.fillRect(d[0] * w * z, d[1] * h * z, w * z, h * z);
-      });
+        context.drawImage(neighbor, dx * w * z, dy * h * z, w * z, h * z);
+        context.fillRect(dx * w * z, dy * h * z, w * z, h * z);
+      }
     };
   }
 
