@@ -35,7 +35,8 @@
   var STORAGE_KEY = 'pixelart-transition-tiles';
   var LABELS = ['TL', 'T', 'TR', 'L', 'C', 'R', 'BL', 'B', 'BR'];
 
-  // Island preview dimensions in tiles (user adjustable).
+  // Island preview dimensions in tiles. Fixed: 5x4 already shows every
+  // repetition case (corners, three-tile edge runs, filled interior).
   var islandW = 5;
   var islandH = 4;
 
@@ -119,7 +120,10 @@
   }
 
   function setHash(base) {
-    var h = String(base) + '|';
+    var pc = controller();
+    // Current frame index is part of the hash: the sheet-map highlight
+    // depends on it, so switching tiles must trigger a redraw.
+    var h = String(base) + '|' + (pc ? pc.getCurrentFrameIndex() : -1) + '|';
     for (var i = base; i < base + 9; i++) {
       h += frameHash(i);
     }
@@ -401,9 +405,7 @@
     panel = document.createElement('div');
     panel.id = 'tt-panel';
     panel.innerHTML =
-      '<div class="tt-title-row"><span class="tt-title">Transition preview</span>' +
-      '<span class="tt-size" title="Island size in tiles"><input type="number" class="tt-w" min="3" max="12" step="1"> x ' +
-      '<input type="number" class="tt-h" min="3" max="12" step="1"></span></div>' +
+      '<div class="tt-title-row"><span class="tt-title">Transition preview</span></div>' +
       '<div class="tt-hint" style="display:none">This set needs 9 frames (it has <span class="tt-hint-count">0</span>). ' +
       'Each frame is one tile of the 3x3 set. <button type="button" class="tt-make-frames button">Add frames to finish this set</button></div>' +
       '<div class="tt-body">' +
@@ -415,21 +417,6 @@
 
     islandCanvas = panel.querySelector('.tt-island');
     sheetCanvas = panel.querySelector('.tt-sheet');
-
-    var wInput = panel.querySelector('.tt-w');
-    var hInput = panel.querySelector('.tt-h');
-    wInput.value = islandW;
-    hInput.value = islandH;
-    wInput.addEventListener('change', function () {
-      islandW = pskl.utils.Math.minmax(parseInt(wInput.value, 10) || 5, 3, 12);
-      wInput.value = islandW;
-      renderIsland(true);
-    });
-    hInput.addEventListener('change', function () {
-      islandH = pskl.utils.Math.minmax(parseInt(hInput.value, 10) || 4, 3, 12);
-      hInput.value = islandH;
-      renderIsland(true);
-    });
 
     sheetCanvas.addEventListener('click', function (evt) {
       var pc = controller();
