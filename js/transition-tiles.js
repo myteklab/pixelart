@@ -8,10 +8,11 @@
  *   frame 4  frame 5  frame 6   =>   L   C  R      (set 1; frames 10-18
  *   frame 7  frame 8  frame 9        BL  B  BR      are set 2, and so on)
  *
- * Three additions, all render-only (no data model or export changes):
+ * What it adds (no data model or export changes):
  *  1. Edit in context: in tile mode, the full 3x3 sheet is rendered around
  *     the drawing area in its fixed arrangement, with the tile being edited
- *     live in its own slot, so every seam is visible while drawing.
+ *     live in its own slot, so every seam is visible while drawing. Pressing
+ *     on any tile makes it the live one, so the whole sheet is drawable.
  *  2. Sheet preview: a clickable 3x3 map of the set for jumping between
  *     tiles, with the edited tile highlighted.
  *  3. Frame badges: TL/T/TR/... labels on the frame list so tile identity
@@ -317,6 +318,195 @@
     centerSheet();
   }
 
+  // ── Paint anywhere on the sheet ────────────────────────────────
+  // Piskel tools only ever write to the current frame, and out-of-bounds
+  // pixels are silently dropped. Rather than teach every tool about a 3x3
+  // surface, the current frame follows the pointer: pressing on a tile
+  // makes that tile current before the tool sees the event. The camera
+  // re-centers on the switch, so nothing moves on screen and the tool gets
+  // ordinary in-frame coordinates.
+
+  // Frame index of the sheet cell under a sprite coordinate (coordinates are
+  // relative to the current tile, so they go negative up and to the left).
+  // -1 when the point is off the sheet.
+  function cellAt(coords) {
+    var pc = controller();
+    var rel = pc.getCurrentFrameIndex() - currentBase();
+    var col = (rel % 3) + Math.floor(coords.x / pc.getWidth());
+    var row = Math.floor(rel / 3) + Math.floor(coords.y / pc.getHeight());
+    if (col < 0 || col > 2 || row < 0 || row > 2) {
+      return -1;
+    }
+    return currentBase() + row * 3 + col;
+  }
+
+  function makeLive(dc, index) {
+    dc.overlayFrame.clear();
+    touched(controller().getCurrentFrameIndex());
+    controller().setCurrentFrameIndex(index);
+    centerSheet();
+  }
+
+  function followPointer(clientX, clientY) {
+    var dc = pskl.app.drawingController;
+    if (!cameraActive() || !dc) {
+      return;
+    }
+    hideHover();
+    var target = cellAt(dc.getSpriteCoordinates(clientX, clientY));
+    if (target !== -1 && target !== controller().getCurrentFrameIndex()) {
+      makeLive(dc, target);
+    }
+  }
+
+  // Pen-family strokes (pen, eraser, mirror pen, lighten, dithering) carry
+  // across seams. The stroke is committed to the tile it is leaving and
+  // reopened on the tile it enters, so one drag can run TL -> T -> TR.
+  // Each tile's part is its own undo step: piskel history replays an action
+  // against a single frame, and a stroke spanning tiles cannot be one.
+  function carryStroke(dc, coords, event) {
+    var pc = controller();
+    var tool = dc.currentToolBehavior;
+    var w = pc.getWidth();
+    var h = pc.getHeight();
+    var rel = pc.getCurrentFrameIndex() - currentBase();
+    var liveCol = rel % 3;
+    var liveRow = Math.floor(rel / 3);
+    var base = currentBase();
+
+    var fromCol = tool.previousCol === null ? coords.x : tool.previousCol;
+    var fromRow = tool.previousRow === null ? coords.y : tool.previousRow;
+    var line = pskl.PixelUtils.getLinePixels(fromCol, coords.x, fromRow, coords.y);
+
+    // Sheet space keeps the walk independent of which tile is live.
+    var originX = liveCol * w;
+    var originY = liveRow * h;
+    for (var i = 0; i < line.length; i++) {
+      var sx = originX + line[i].col;
+      var sy = originY + line[i].row;
+      var col = Math.floor(sx / w);
+      var row = Math.floor(sy / h);
+      if (col < 0 || col > 2 || row < 0 || row > 2) {
+        continue;
+      }
+      if (col !== liveCol || row !== liveRow) {
+        tool.releaseToolAt(tool.previousCol, tool.previousRow, pc.getCurrentFrame(), dc.overlayFrame, event);
+        $.publish(Events.TOOL_RELEASED);
+        makeLive(dc, base + row * 3 + col);
+        $.publish(Events.TOOL_PRESSED);
+        liveCol = col;
+        liveRow = row;
+      }
+      tool.applyToolAt(sx - col * w, sy - row * h, pc.getCurrentFrame(), dc.overlayFrame, event);
+    }
+    // The pointer may have ended off the sheet. Keep its true position so
+    // the next move interpolates from there, not from the last painted pixel.
+    tool.previousCol = originX + coords.x - liveCol * w;
+    tool.previousRow = originY + coords.y - liveRow * h;
+  }
+
+  // Tiles are now left within milliseconds of being painted. Anything that
+  // polls only the current frame (live collaboration does) would miss those
+  // pixels, so say which tile was just left.
+  function touched(index) {
+    try {
+      window.dispatchEvent(new CustomEvent('pixelart:frame-touched', { detail: { frame: index } }));
+    } catch (e) {}
+  }
+
+  var hoverEl = null;
+
+  function hideHover() {
+    if (hoverEl) {
+      hoverEl.style.display = 'none';
+    }
+  }
+
+  // The stock highlighted pixel lives in the current frame's overlay and
+  // cannot leave it, so tiles that are not live get their own marker.
+  function showHover(dc, coords, clientX, clientY) {
+    var host = document.getElementById('drawing-canvas-container');
+    var rect = host && host.getBoundingClientRect();
+    if (!rect || clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) {
+      hideHover();
+      return;
+    }
+    if (!hoverEl) {
+      hoverEl = document.createElement('div');
+      hoverEl.className = 'tt-hover';
+      host.appendChild(hoverEl);
+    }
+    var tool = dc.currentToolBehavior;
+    var size = tool && tool.supportsDynamicPenSize() ? pskl.app.penSizeService.getPenSize() : 1;
+    var z = dc.renderer.getZoom();
+    var half = Math.floor(size / 2);
+    // getScreenCoordinates answers with the CENTER of the pixel.
+    var s = dc.getScreenCoordinates(coords.x - half, coords.y - half);
+    hoverEl.style.left = (s.x - z / 2 - rect.left - window.pageXOffset) + 'px';
+    hoverEl.style.top = (s.y - z / 2 - rect.top - window.pageYOffset) + 'px';
+    hoverEl.style.width = hoverEl.style.height = (size * z) + 'px';
+    hoverEl.style.display = 'block';
+  }
+
+  function patchPaintAnywhere() {
+    var host = document.getElementById('drawing-canvas-container');
+    // Piskel binds its mousedown and touchstart handlers at init, so
+    // patching the prototype would never be called. Capture-phase listeners
+    // run first, which is all that is needed: the frame is already switched
+    // when piskel reads the coordinates.
+    host.addEventListener('mousedown', function (evt) {
+      if (evt.button !== Constants.MIDDLE_BUTTON) {
+        followPointer(evt.clientX, evt.clientY);
+      }
+    }, true);
+    window.addEventListener('touchstart', function (evt) {
+      var t = evt.changedTouches && evt.changedTouches[0];
+      if (t && host.contains(evt.target)) {
+        followPointer(t.clientX, t.clientY);
+      }
+    }, true);
+    host.addEventListener('mouseleave', hideHover);
+
+    var proto = pskl.controller.DrawingController.prototype;
+    var original = proto.moveTool_;
+    proto.moveTool_ = function (x, y, event) {
+      if (!cameraActive()) {
+        hideHover();
+        return original.call(this, x, y, event);
+      }
+      var coords = this.getSpriteCoordinates(x, y);
+      var target = cellAt(coords);
+      var elsewhere = target !== controller().getCurrentFrameIndex();
+
+      if (!this.isClicked) {
+        if (elsewhere && target !== -1) {
+          showHover(this, coords, x, y);
+        } else {
+          hideHover();
+        }
+        return original.call(this, x, y, event);
+      }
+
+      hideHover();
+      var tool = this.currentToolBehavior;
+      var carries = tool instanceof pskl.tools.drawing.SimplePen &&
+        !this.isPickingColor && !pskl.app.mouseStateService.isMiddleButtonPressed();
+      if (!carries) {
+        return original.call(this, x, y, event);
+      }
+      var frame = controller().getCurrentFrame();
+      var cameFromOutside = tool.previousCol !== null &&
+        !frame.containsPixel(tool.previousCol, tool.previousRow);
+      if (!elsewhere && !cameFromOutside) {
+        return original.call(this, x, y, event);
+      }
+      $.publish(Events.MOUSE_EVENT, [event, this]);
+      carryStroke(this, { x: coords.x | 0, y: coords.y | 0 }, event);
+      var now = this.getSpriteCoordinates(x, y);
+      $.publish(Events.CURSOR_MOVED, [now.x, now.y]);
+    };
+  }
+
   // ── 2. Sheet preview panel (the clickable 3x3 map) ─────────────
 
   var panel = null;
@@ -473,8 +663,9 @@
       '  <input type="checkbox" class="tt-enable-checkbox"> Group frames into 3x3 transition tilesets' +
       '</label>' +
       '<div class="preferences-description">Every 9 frames form one set (frames 1-9, 10-18, and so on). ' +
-      'Shows the whole set around the canvas while you draw, adds a set preview, and labels each tile. ' +
-      'Turns on tile mode.</div>' +
+      'Shows the whole set around the canvas, and you can draw on any tile in it without picking its ' +
+      'frame first. Pen and eraser strokes carry across the seams. Adds a set preview and labels each ' +
+      'tile. Turns on tile mode.</div>' +
       '<div class="preferences-description tt-fps-note">Also sets the animation FPS to 0. ' +
       'FPS 0 tells the gallery this project is a tileset, so previews show your tiles laid out ' +
       'as a sheet instead of playing them like a flipbook. Set FPS above 0 to make it an ' +
@@ -528,6 +719,9 @@
       '.tt-badge { position: absolute; bottom: 2px; left: 2px; background: rgba(0,0,0,.7);',
       '  color: #ffd93d; font-size: 9px; font-weight: bold; padding: 0 3px; border-radius: 2px;',
       '  pointer-events: none; z-index: 5; }',
+      '.tt-hover { position: absolute; display: none; pointer-events: none; z-index: 20;',
+      '  box-sizing: border-box; background: rgba(255,255,255,.3);',
+      '  border: 1px solid rgba(0,0,0,.45); }',
       '.tt-settings { margin-top: 12px; }',
       '.tt-settings .preferences-description { font-size: 11px; color: #888; }'
     ].join('\n');
@@ -603,6 +797,7 @@
       injectStyles();
       patchTiledFrames();
       patchOffsetClamp();
+      patchPaintAnywhere();
       buildPanel();
       subscribeAll();
       syncUi();
