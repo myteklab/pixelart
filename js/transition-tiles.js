@@ -674,6 +674,51 @@
     }
   }
 
+  // Runs against the inner controller: the public one records every frame
+  // operation as its own history step, and nine undos for one button press
+  // is not what anyone means by undo.
+  function copySet(base) {
+    var inner = controller().piskelController;
+    inner.getLayers().forEach(function (layer) {
+      for (var i = 0; i < 9; i++) {
+        layer.addFrameAt(layer.getFrameAt(base + i).clone(), base + 9 + i);
+      }
+    });
+  }
+
+  // The copy lands right after its source, which pushes every later set
+  // along by exactly one bank, so they all stay whole.
+  function duplicateSet() {
+    var pc = controller();
+    if (!pc || !hasFullSet()) {
+      return;
+    }
+    var base = currentBase();
+    var rel = pc.getCurrentFrameIndex() - base;
+    var state = { frameIndex: pc.getCurrentFrameIndex(), layerIndex: pc.getCurrentLayerIndex() };
+    copySet(base);
+    $.publish(Events.PISKEL_SAVE_STATE, {
+      type: pskl.service.HistoryService.REPLAY,
+      scope: { replay: function (frame, data) { copySet(data.base); } },
+      replay: { base: base },
+      state: state
+    });
+    // Same tile, new set: the sheet on screen is replaced by its copy with
+    // nothing appearing to move.
+    pc.setCurrentFrameIndex(base + 9 + rel);
+    cache = {};
+    renderSheet(true);
+    badgeFrameList();
+    // The frame list redraws on its own clock, and the new set is usually
+    // below the fold.
+    setTimeout(function () {
+      var tile = document.querySelector('#preview-list .preview-tile.selected');
+      if (tile && tile.scrollIntoView) {
+        tile.scrollIntoView({ block: 'nearest' });
+      }
+    }, 300);
+  }
+
   function buildPanel() {
     var host = document.getElementById('animated-preview-container');
     if (!host || document.getElementById('tt-panel')) {
@@ -687,6 +732,8 @@
       'Each frame is one tile of the 3x3 set. <button type="button" class="tt-make-frames button">Add frames to finish this set</button></div>' +
       '<div class="tt-body">' +
       '  <canvas class="tt-sheet" title="Click a tile to edit it"></canvas>' +
+      '  <button type="button" class="tt-duplicate button" ' +
+      'title="Copy all 9 tiles into a new set, right after this one">Duplicate this set</button>' +
       '</div>';
     host.parentNode.insertBefore(panel, host.nextSibling);
 
@@ -704,6 +751,8 @@
       r = pskl.utils.Math.minmax(r, 0, 2);
       pc.setCurrentFrameIndex(currentBase() + r * 3 + c);
     });
+
+    panel.querySelector('.tt-duplicate').addEventListener('click', duplicateSet);
 
     panel.querySelector('.tt-make-frames').addEventListener('click', function () {
       var pc = controller();
@@ -814,6 +863,8 @@
       '  background-size: 12px 12px; border: 1px solid #3d3d3d; }',
       '#tt-panel .tt-hint { color: #c9a53d; }',
       '#tt-panel .tt-make-frames { margin-top: 4px; font-size: 11px; }',
+      '#tt-panel .tt-duplicate { display: block; margin: 6px auto 0; font-size: 11px;',
+      '  white-space: nowrap; }',
       '.preview-tile { position: relative; }',
       '.tt-badge { position: absolute; bottom: 2px; left: 2px; background: rgba(0,0,0,.7);',
       '  color: #ffd93d; font-size: 9px; font-weight: bold; padding: 0 3px; border-radius: 2px;',
