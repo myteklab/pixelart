@@ -637,6 +637,7 @@
       return;
     }
     lastRenderHash = hash;
+    syncActions();
 
     var tw = pc.getCurrentFrame().getWidth();
     var th = pc.getCurrentFrame().getHeight();
@@ -860,6 +861,141 @@
     });
   }
 
+  // ── Mirror ─────────────────────────────────────────────────────
+  // A set drawn for a symmetric material only needs three of its eight
+  // outer tiles: one corner, one top or bottom edge, one side edge. The
+  // rest are the same art flipped.
+
+  var ICON_MIRROR = '<svg viewBox="0 0 16 16"><path d="M8 1.5v13M5.5 4.5 2 8l3.5 3.5zM10.5 4.5 14 8l-3.5 3.5z"/></svg>';
+  var ICON_COPY = '<svg viewBox="0 0 16 16"><rect x="2" y="2" width="8.5" height="8.5" rx="1"/>' +
+    '<path d="M5.5 13.5h7a1 1 0 0 0 1-1v-7"/></svg>';
+  var ICON_PLUS = '<svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg>';
+
+  // Tiles that are each other flipped. The center has no partner.
+  var PARTNERS = [[0, 2, 6, 8], [1, 7], [3, 5]];
+
+  function partnersOf(pos) {
+    for (var i = 0; i < PARTNERS.length; i++) {
+      if (PARTNERS[i].indexOf(pos) !== -1) {
+        return PARTNERS[i].filter(function (p) { return p !== pos; });
+      }
+    }
+    return [];
+  }
+
+  // Empty means empty on every layer. A tile with art on a hidden or lower
+  // layer is somebody's work and must not be filled over.
+  function tileEmpty(index) {
+    var layers = controller().getLayers();
+    for (var i = 0; i < layers.length; i++) {
+      var px = layers[i].getFrameAt(index).pixels;
+      for (var k = 0; k < px.length; k++) {
+        if (px[k] !== 0) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  function emptyPairs(base) {
+    var pairs = [];
+    PARTNERS.forEach(function (group) {
+      var drawn = group.filter(function (p) { return !tileEmpty(base + p); });
+      if (!drawn.length) {
+        return;
+      }
+      group.forEach(function (p) {
+        if (drawn.indexOf(p) === -1) {
+          pairs.push([base + drawn[0], base + p]);
+        }
+      });
+    });
+    return pairs;
+  }
+
+  function livePairs() {
+    var pc = controller();
+    var cur = pc.getCurrentFrameIndex();
+    var base = currentBase();
+    if (tileEmpty(cur)) {
+      return [];
+    }
+    return partnersOf(cur - base).map(function (p) {
+      return [cur, base + p];
+    });
+  }
+
+  function flipInto(src, dst, flipH, flipV) {
+    var w = src.getWidth();
+    var h = src.getHeight();
+    var from = src.pixels;
+    var to = new Uint32Array(w * h);
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        to[y * w + x] = from[(flipV ? h - 1 - y : y) * w + (flipH ? w - 1 - x : x)];
+      }
+    }
+    dst.setPixels(to);
+  }
+
+  function applyPairs(pairs) {
+    controller().getLayers().forEach(function (layer) {
+      pairs.forEach(function (pair) {
+        var a = pair[0] % 9;
+        var b = pair[1] % 9;
+        flipInto(layer.getFrameAt(pair[0]), layer.getFrameAt(pair[1]),
+          a % 3 !== b % 3, Math.floor(a / 3) !== Math.floor(b / 3));
+      });
+    });
+    pairs.forEach(function (pair) {
+      touched(pair[1]);
+    });
+  }
+
+  function mirror(pairs) {
+    var pc = controller();
+    if (!pc || !hasFullSet() || !pairs.length) {
+      return;
+    }
+    applyPairs(pairs);
+    // The pairs are decided once, here. Replaying the decision (which tiles
+    // are empty) could come out differently and redo would drift.
+    $.publish(Events.PISKEL_SAVE_STATE, {
+      type: pskl.service.HistoryService.REPLAY,
+      scope: { replay: function (frame, data) { applyPairs(data.pairs); } },
+      replay: { pairs: pairs }
+    });
+    $.publish(Events.PISKEL_RESET);
+    renderSheet(true);
+  }
+
+  function syncActions() {
+    if (!panel || !hasFullSet()) {
+      return;
+    }
+    var pc = controller();
+    var fill = emptyPairs(currentBase());
+    var fillBtn = panel.querySelector('.tt-mirror-empty');
+    fillBtn.disabled = !fill.length;
+
+    var liveBtn = panel.querySelector('.tt-mirror-live');
+    var says = panel.querySelector('.tt-mirror-live-says');
+    var pos = pc.getCurrentFrameIndex() - currentBase();
+    var partners = partnersOf(pos);
+    if (!partners.length) {
+      says.textContent = 'The center tile has no mirror';
+      liveBtn.disabled = true;
+      liveBtn.title = 'Pick a corner or an edge tile to mirror it.';
+      return;
+    }
+    var to = partners.map(function (p) { return LABELS[p]; }).join(', ');
+    says.textContent = 'Mirror ' + LABELS[pos] + ' onto ' + to;
+    liveBtn.disabled = tileEmpty(pc.getCurrentFrameIndex());
+    liveBtn.title = liveBtn.disabled ? 'This tile is empty, so there is nothing to mirror.' :
+      'Replace ' + to + ' with flipped copies of ' + LABELS[pos] + '. Undo brings them back.';
+  }
+
   // Runs against the inner controller: the public one records every frame
   // operation as its own history step, and nine undos for one button press
   // is not what anyone means by undo.
@@ -915,15 +1051,25 @@
     panel.innerHTML =
       '<div class="tt-title-row"><span class="tt-title">Transition preview</span></div>' +
       '<div class="tt-hint" style="display:none">This set needs 9 frames (it has <span class="tt-hint-count">0</span>). ' +
-      'Each frame is one tile of the 3x3 set. <button type="button" class="tt-make-frames button">Add frames to finish this set</button></div>' +
+      'Each frame is one tile of the 3x3 set. <button type="button" class="tt-make-frames tt-action">' +
+      ICON_PLUS + '<span>Add frames to finish this set</span></button></div>' +
       '<div class="tt-body">' +
       '  <canvas class="tt-sheet" title="Click a tile to edit it"></canvas>' +
-      '  <div class="tt-reach" style="display:none"><span class="tt-reach-says"></span> ' +
-      '<button type="button" data-reach="tile">this tile</button>' +
-      '<button type="button" data-reach="set">this set</button>' +
-      '<button type="button" data-reach="all">every set</button></div>' +
-      '  <button type="button" class="tt-duplicate button" ' +
-      'title="Copy all 9 tiles into a new set, right after this one">Duplicate this set</button>' +
+      '  <div class="tt-reach" style="display:none"><span class="tt-reach-says"></span>' +
+      '<div class="tt-seg">' +
+      '<button type="button" data-reach="tile">This tile</button>' +
+      '<button type="button" data-reach="set">This set</button>' +
+      '<button type="button" data-reach="all">Every set</button></div></div>' +
+      '  <div class="tt-actions">' +
+      '<button type="button" class="tt-mirror-empty tt-action" ' +
+      'title="Fill each empty tile with a flipped copy of the matching tile you have drawn. Drawn tiles are left alone.">' +
+      ICON_MIRROR + '<span>Mirror into empty tiles</span></button>' +
+      '<button type="button" class="tt-mirror-live tt-action">' +
+      ICON_MIRROR + '<span class="tt-mirror-live-says"></span></button>' +
+      '<button type="button" class="tt-duplicate tt-action" ' +
+      'title="Copy all 9 tiles into a new set, right after this one">' +
+      ICON_COPY + '<span>Duplicate this set</span></button>' +
+      '  </div>' +
       '</div>';
     host.parentNode.insertBefore(panel, host.nextSibling);
 
@@ -943,6 +1089,12 @@
     });
 
     panel.querySelector('.tt-duplicate').addEventListener('click', duplicateSet);
+    panel.querySelector('.tt-mirror-empty').addEventListener('click', function () {
+      mirror(emptyPairs(currentBase()));
+    });
+    panel.querySelector('.tt-mirror-live').addEventListener('click', function () {
+      mirror(livePairs());
+    });
     panel.querySelector('.tt-reach').addEventListener('click', function (evt) {
       var reach = evt.target.getAttribute && evt.target.getAttribute('data-reach');
       var cfg = REACH[currentToolId()];
@@ -1099,14 +1251,32 @@
       '  background-image: conic-gradient(#3a3a3a 25%, #2c2c2c 0 50%, #3a3a3a 0 75%, #2c2c2c 0);',
       '  background-size: 12px 12px; border: 1px solid #3d3d3d; }',
       '#tt-panel .tt-hint { color: #c9a53d; }',
-      '#tt-panel .tt-make-frames { margin-top: 4px; font-size: 11px; }',
-      '#tt-panel .tt-reach { margin-top: 6px; font-size: 11px; line-height: 20px; }',
-      '#tt-panel .tt-reach-option { margin: 0 0 0 4px; padding: 0 5px; font: inherit; line-height: 16px;',
-      '  color: #b3b3b3; background: #333; border: 1px solid #4a4a4a; border-radius: 2px;',
-      '  cursor: pointer; white-space: nowrap; }',
-      '#tt-panel .tt-reach-on { color: #1d1d1d; background: #ffd93d; border-color: #ffd93d; }',
-      '#tt-panel .tt-duplicate { display: block; margin: 6px auto 0; font-size: 11px;',
-      '  white-space: nowrap; }',
+      '#tt-panel .tt-reach { margin-top: 8px; }',
+      '#tt-panel .tt-reach-says { display: block; margin-bottom: 3px; font-size: 10px;',
+      '  letter-spacing: .06em; text-transform: uppercase; color: #8a8a8a; }',
+      '#tt-panel .tt-seg { display: flex; border: 1px solid #4a4a4a; border-radius: 4px;',
+      '  overflow: hidden; }',
+      '#tt-panel .tt-seg button { flex: 1 1 0; min-width: 0; height: 22px; margin: 0; padding: 0 2px;',
+      '  font-family: inherit; font-size: 11px; color: #bdbdbd; background: #2e2e2e; border: 0;',
+      '  border-left: 1px solid #4a4a4a; cursor: pointer; white-space: nowrap; }',
+      '#tt-panel .tt-seg button:first-child { border-left: 0; }',
+      '#tt-panel .tt-seg button:hover { color: #fff; background: #3a3a3a; }',
+      '#tt-panel .tt-seg button.tt-reach-on { color: #1d1d1d; background: #ffd93d; font-weight: bold; }',
+      '#tt-panel .tt-actions { display: flex; flex-direction: column; margin-top: 8px;',
+      '  padding-top: 8px; border-top: 1px solid #3a3a3a; }',
+      '#tt-panel .tt-action { display: flex; align-items: center; box-sizing: border-box; width: 100%;',
+      '  height: 24px; margin: 0 0 4px; padding: 0 7px; font-family: inherit; font-size: 11px;',
+      '  text-align: left; color: #d3d3d3; background: #333; border: 1px solid #4a4a4a;',
+      '  border-radius: 4px; cursor: pointer; }',
+      '#tt-panel .tt-action:last-child { margin-bottom: 0; }',
+      '#tt-panel .tt-action span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }',
+      '#tt-panel .tt-action svg { flex: none; width: 14px; height: 14px; margin-right: 6px;',
+      '  fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linejoin: round;',
+      '  stroke-linecap: round; }',
+      '#tt-panel .tt-action:hover { color: #fff; border-color: #ffd93d; }',
+      '#tt-panel .tt-action:disabled { color: #777; border-color: #3a3a3a; background: #2a2a2a;',
+      '  cursor: default; }',
+      '#tt-panel .tt-make-frames { margin-top: 6px; }',
       '.preview-tile { position: relative; }',
       '.tt-badge { position: absolute; bottom: 2px; left: 2px; background: rgba(0,0,0,.7);',
       '  color: #ffd93d; font-size: 9px; font-weight: bold; padding: 0 3px; border-radius: 2px;',
@@ -1163,6 +1333,13 @@
         renderSheet(false);
         badgeFrameList();
       });
+    });
+    // Piskel picks a new zoom for ONE frame 200ms after a resize, which
+    // leaves the sheet hanging off the canvas. Fit again once it has.
+    var refit = null;
+    window.addEventListener('resize', function () {
+      clearTimeout(refit);
+      refit = setTimeout(fitSheet, 350);
     });
     // Fallback sweep: catches frame add/delete/reorder, settings panels
     // appearing, and external enable/disable changes, without chasing every
