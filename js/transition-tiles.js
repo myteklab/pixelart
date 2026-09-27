@@ -680,18 +680,38 @@
   // several sets needs the one in between, and it is the default here
   // because the sheet on screen reads as one picture.
 
-  var REACH_KEY = 'pixelart-transition-swap-reach';
-  var REACHES = ['tile', 'set', 'all'];
+  // The bucket starts on one tile. A new set is nine empty tiles, and a
+  // fill that crossed seams there would flood the whole sheet from a click
+  // meant for one tile.
+  var REACH = {
+    'tool-colorswap': {
+      key: 'pixelart-transition-swap-reach',
+      says: 'Paint all changes',
+      options: ['tile', 'set', 'all'],
+      start: 'set'
+    },
+    'tool-paint-bucket': {
+      key: 'pixelart-transition-fill-reach',
+      says: 'Bucket fills across',
+      options: ['tile', 'set'],
+      start: 'tile'
+    }
+  };
 
-  function swapReach() {
+  function reachOf(toolId) {
+    var cfg = REACH[toolId];
     var v = null;
-    try { v = localStorage.getItem(REACH_KEY); } catch (e) {}
-    return REACHES.indexOf(v) === -1 ? 'set' : v;
+    try { v = localStorage.getItem(cfg.key); } catch (e) {}
+    return cfg.options.indexOf(v) === -1 ? cfg.start : v;
   }
 
-  function setSwapReach(v) {
-    try { localStorage.setItem(REACH_KEY, v); } catch (e) {}
-    syncReachUi();
+  function swapReach() {
+    return reachOf('tool-colorswap');
+  }
+
+  function currentToolId() {
+    var tool = pskl.app.drawingController && pskl.app.drawingController.currentToolBehavior;
+    return tool ? tool.toolId : '';
   }
 
   function syncReachUi() {
@@ -699,15 +719,80 @@
       return;
     }
     var row = panel.querySelector('.tt-reach');
-    var tool = pskl.app.drawingController && pskl.app.drawingController.currentToolBehavior;
-    var show = !!tool && tool.toolId === 'tool-colorswap' && cameraActive();
-    row.style.display = show ? 'block' : 'none';
-    var reach = swapReach();
+    var cfg = REACH[currentToolId()];
+    if (!cfg || !cameraActive()) {
+      row.style.display = 'none';
+      return;
+    }
+    row.style.display = 'block';
+    row.querySelector('.tt-reach-says').textContent = cfg.says;
+    var reach = reachOf(currentToolId());
     var buttons = row.querySelectorAll('button');
     for (var i = 0; i < buttons.length; i++) {
-      var on = buttons[i].getAttribute('data-reach') === reach;
-      buttons[i].className = 'tt-reach-option' + (on ? ' tt-reach-on' : '');
+      var name = buttons[i].getAttribute('data-reach');
+      buttons[i].style.display = cfg.options.indexOf(name) === -1 ? 'none' : '';
+      buttons[i].className = 'tt-reach-option' + (name === reach ? ' tt-reach-on' : '');
     }
+  }
+
+  // Flood fill over the whole set. The nine tiles are laid into one frame
+  // so piskel's own fill does the work, then only the pixels it changed are
+  // written back. x and y are in sheet space.
+  function fillSet(base, x, y, color) {
+    var pc = controller();
+    var layer = pc.getCurrentLayer();
+    var w = pc.getWidth();
+    var h = pc.getHeight();
+    var sheet = new pskl.model.Frame(3 * w, 3 * h);
+    var tiles = [];
+    var i;
+    for (i = 0; i < 9; i++) {
+      tiles.push(layer.getFrameAt(base + i));
+    }
+    tiles.forEach(function (tile, n) {
+      var ox = (n % 3) * w;
+      var oy = Math.floor(n / 3) * h;
+      tile.forEachPixel(function (c, col, row) {
+        sheet.setPixel(ox + col, oy + row, c);
+      });
+    });
+    var before = sheet.getPixels();
+    pskl.PixelUtils.paintSimilarConnectedPixelsFromFrame(sheet, x, y, color);
+    sheet.forEachPixel(function (c, col, row) {
+      if (c !== before[row * 3 * w + col]) {
+        tiles[Math.floor(row / h) * 3 + Math.floor(col / w)].setPixel(col % w, row % h, c);
+      }
+    });
+    for (i = 0; i < 9; i++) {
+      touched(base + i);
+    }
+  }
+
+  function patchBucket() {
+    var proto = pskl.tools.drawing.PaintBucket.prototype;
+    var apply = proto.applyToolAt;
+    var replay = proto.replay;
+
+    proto.applyToolAt = function (col, row, frame, overlay, event) {
+      if (!cameraActive() || reachOf('tool-paint-bucket') !== 'set' || !frame.containsPixel(col, row)) {
+        return apply.call(this, col, row, frame, overlay, event);
+      }
+      var pc = controller();
+      var base = currentBase();
+      var rel = pc.getCurrentFrameIndex() - base;
+      var x = (rel % 3) * pc.getWidth() + col;
+      var y = Math.floor(rel / 3) * pc.getHeight() + row;
+      var color = this.getToolColor();
+      fillSet(base, x, y, color);
+      this.raiseSaveStateEvent({ setBase: base, x: x, y: y, color: color });
+    };
+
+    proto.replay = function (frame, data) {
+      if (typeof data.setBase === 'number') {
+        return fillSet(data.setBase, data.x, data.y, data.color);
+      }
+      return replay.call(this, frame, data);
+    };
   }
 
   function swapInSet(tool, base, oldColor, newColor, allLayers) {
@@ -833,7 +918,7 @@
       'Each frame is one tile of the 3x3 set. <button type="button" class="tt-make-frames button">Add frames to finish this set</button></div>' +
       '<div class="tt-body">' +
       '  <canvas class="tt-sheet" title="Click a tile to edit it"></canvas>' +
-      '  <div class="tt-reach" style="display:none">Paint all changes ' +
+      '  <div class="tt-reach" style="display:none"><span class="tt-reach-says"></span> ' +
       '<button type="button" data-reach="tile">this tile</button>' +
       '<button type="button" data-reach="set">this set</button>' +
       '<button type="button" data-reach="all">every set</button></div>' +
@@ -860,8 +945,10 @@
     panel.querySelector('.tt-duplicate').addEventListener('click', duplicateSet);
     panel.querySelector('.tt-reach').addEventListener('click', function (evt) {
       var reach = evt.target.getAttribute && evt.target.getAttribute('data-reach');
-      if (reach) {
-        setSwapReach(reach);
+      var cfg = REACH[currentToolId()];
+      if (reach && cfg) {
+        try { localStorage.setItem(cfg.key, reach); } catch (e) {}
+        syncReachUi();
       }
     });
 
@@ -1094,6 +1181,11 @@
       }
       badgeFrameList();
       if (!isEnabled()) {
+        // Switched off from outside setEnabled (another tab shares the
+        // setting). The camera and the outline still need handing back.
+        if (wasActive) {
+          trackFrameChange();
+        }
         return;
       }
       trackFrameChange();
@@ -1120,6 +1212,7 @@
       patchOffsetClamp();
       patchPaintAnywhere();
       patchColorSwap();
+      patchBucket();
       buildPanel();
       subscribeAll();
       syncUi();
