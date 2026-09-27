@@ -48,6 +48,9 @@
       pskl.UserSettings.set(pskl.UserSettings.SEAMLESS_MODE, true);
       markNotAnimation();
     }
+    if (!on && seamsOn) {
+      setSeamsOn(false);
+    }
     syncUi();
     dropOutline();
     $.publish(Events.PISKEL_RESET);
@@ -294,6 +297,7 @@
         ctx.strokeStyle = '#ffd93d';
         ctx.lineWidth = 1;
         ctx.strokeRect(col * tw - 0.5, row * th - 0.5, tw + 1, th + 1);
+        drawSeamMarks(ctx, z, tw, th);
       }
       ctx.restore();
     };
@@ -638,6 +642,9 @@
     }
     lastRenderHash = hash;
     syncActions();
+    if (seamsOn) {
+      refreshSeams();
+    }
 
     var tw = pc.getCurrentFrame().getWidth();
     var th = pc.getCurrentFrame().getHeight();
@@ -861,6 +868,243 @@
     });
   }
 
+  // ── Seam check ─────────────────────────────────────────────────
+  // Finds the places where a tile's edge does not continue into the tile
+  // beside it, and flashes them. It only points. Nothing is written to the
+  // project: the marks are painted on the tool overlay at render time, so
+  // they cannot reach a save, an export, a preview, or a collaborator.
+
+  // Same distance the single-tile tiling check uses, so the two agree on
+  // what counts as a different color.
+  var SEAM_DIST = 60;
+  var SEAM_FLASH_MS = 360;
+  // Owned by the platform's tiling helper. Its flashing marks are not art.
+  var HELPER_LAYER = 'AI: fix these';
+
+  // [tile A, side of A, tile B, side of B]. The first twelve are the seams
+  // inside the sheet. The rest are tiles that repeat against themselves on
+  // a real map: edges run along their own direction, the center both ways.
+  var SEAMS = [
+    [0, 'r', 1, 'l'], [1, 'r', 2, 'l'], [3, 'r', 4, 'l'], [4, 'r', 5, 'l'], [6, 'r', 7, 'l'], [7, 'r', 8, 'l'],
+    [0, 'b', 3, 't'], [3, 'b', 6, 't'], [1, 'b', 4, 't'], [4, 'b', 7, 't'], [2, 'b', 5, 't'], [5, 'b', 8, 't'],
+    [1, 'r', 1, 'l'], [7, 'r', 7, 'l'], [3, 'b', 3, 't'], [5, 'b', 5, 't'], [4, 'r', 4, 'l'], [4, 'b', 4, 't']
+  ];
+
+  var seamsOn = false;
+  var seamMarks = [];   // {pos, x, y} within the current set
+  var seamPhase = 0;
+  var seamTimer = null;
+
+  function mergedTile(index) {
+    var pc = controller();
+    var w = pc.getWidth();
+    var h = pc.getHeight();
+    var out = new Uint32Array(w * h);
+    var layers = pc.getLayers();
+    var any = false;
+    for (var l = layers.length - 1; l >= 0; l--) {
+      if (layers[l].getName() === HELPER_LAYER) {
+        continue;
+      }
+      var px = layers[l].getFrameAt(index).pixels;
+      for (var i = 0; i < px.length; i++) {
+        if (!out[i] && px[i] >>> 24) {
+          out[i] = px[i];
+          any = true;
+        }
+      }
+    }
+    return { w: w, h: h, px: out, empty: !any };
+  }
+
+  function colorDist(p, q) {
+    var pa = p >>> 24;
+    var qa = q >>> 24;
+    if (!pa || !qa) {
+      return pa === qa ? 0 : 255;
+    }
+    var dr = (p & 255) - (q & 255);
+    var dg = ((p >> 8) & 255) - ((q >> 8) & 255);
+    var db = ((p >> 16) & 255) - ((q >> 16) & 255);
+    return Math.sqrt(dr * dr + dg * dg + db * db);
+  }
+
+  // Where pixel i of an edge sits, depth pixels in from that edge.
+  function edgeXY(t, side, i, depth) {
+    if (side === 'r') { return { x: t.w - 1 - depth, y: i }; }
+    if (side === 'l') { return { x: depth, y: i }; }
+    if (side === 'b') { return { x: i, y: t.h - 1 - depth }; }
+    return { x: i, y: depth };
+  }
+
+  function edgePx(t, side, i, depth) {
+    var at = edgeXY(t, side, i, depth);
+    return t.px[at.y * t.w + at.x];
+  }
+
+  function edgeLen(t, side) {
+    return side === 'r' || side === 'l' ? t.h : t.w;
+  }
+
+  // A lone pixel of texture that happens to sit on the edge. It differs
+  // from everything around it in its own tile, so the seam did not cause
+  // it. A line that RUNS INTO the edge is not a speck: the pixel behind it
+  // matches, and that is exactly the thing that has to continue next door.
+  function isSpeck(t, side, i) {
+    var p = edgePx(t, side, i, 0);
+    var n = edgeLen(t, side);
+    return colorDist(p, edgePx(t, side, i, 1)) > SEAM_DIST &&
+      (i === 0 || colorDist(p, edgePx(t, side, i - 1, 0)) > SEAM_DIST) &&
+      (i === n - 1 || colorDist(p, edgePx(t, side, i + 1, 0)) > SEAM_DIST);
+  }
+
+  // A border drawn along the edge: most of the edge differs from the row
+  // behind it. Two tiles that both have one match each other pixel for
+  // pixel and still show as a double line on the map.
+  function hasEdgeLine(t, side) {
+    var n = edgeLen(t, side);
+    var hits = 0;
+    for (var i = 0; i < n; i++) {
+      var p = edgePx(t, side, i, 0);
+      if ((p >>> 24) && colorDist(p, edgePx(t, side, i, 1)) > SEAM_DIST) {
+        hits++;
+      }
+    }
+    return hits >= n * 0.75;
+  }
+
+  function checkSeams(base) {
+    var tiles = [];
+    var empty = [];
+    var i;
+    for (i = 0; i < 9; i++) {
+      tiles.push(mergedTile(base + i));
+      if (tiles[i].empty) {
+        empty.push(i);
+      }
+    }
+    var found = [];
+    SEAMS.forEach(function (seam) {
+      var a = tiles[seam[0]];
+      var b = tiles[seam[2]];
+      // A tile that is not drawn yet is not a mistake.
+      if (a.empty || b.empty) {
+        return;
+      }
+      var marks = [];
+      var breaks = 0;
+      var n = edgeLen(a, seam[1]);
+      for (var k = 0; k < n; k++) {
+        if (colorDist(edgePx(a, seam[1], k, 0), edgePx(b, seam[3], k, 0)) > SEAM_DIST &&
+            !isSpeck(a, seam[1], k) && !isSpeck(b, seam[3], k)) {
+          breaks++;
+          marks.push({ pos: seam[0], at: edgeXY(a, seam[1], k, 0) });
+          marks.push({ pos: seam[2], at: edgeXY(b, seam[3], k, 0) });
+        }
+      }
+      var lineA = hasEdgeLine(a, seam[1]);
+      var lineB = hasEdgeLine(b, seam[3]);
+      if (!breaks && (lineA || lineB)) {
+        for (k = 0; k < n; k++) {
+          if (lineA) { marks.push({ pos: seam[0], at: edgeXY(a, seam[1], k, 0) }); }
+          if (lineB) { marks.push({ pos: seam[2], at: edgeXY(b, seam[3], k, 0) }); }
+        }
+      }
+      if (marks.length) {
+        found.push({
+          a: seam[0], b: seam[2], breaks: breaks, line: lineA || lineB,
+          stacked: seam[1] === 'b', marks: marks
+        });
+      }
+    });
+    return { seams: found, empty: empty, checked: 9 - empty.length };
+  }
+
+  function drawSeamMarks(ctx, z, tw, th) {
+    if (!seamsOn || !seamMarks.length || seamPhase === 2) {
+      return;
+    }
+    // White, then magenta, then nothing. The gap is what makes it read as
+    // a blink on any color, black and white included.
+    ctx.fillStyle = seamPhase === 0 ? '#ffffff' : '#ff00e5';
+    for (var i = 0; i < seamMarks.length; i++) {
+      var m = seamMarks[i];
+      ctx.fillRect((m.pos % 3) * tw + m.at.x * z, Math.floor(m.pos / 3) * th + m.at.y * z, z, z);
+    }
+  }
+
+  function seamSays(seam) {
+    // A tile against a copy of itself, the way it repeats on a map.
+    var joins = seam.a !== seam.b ? ' and ' : (seam.stacked ? ' above ' : ' beside ');
+    var pair = '<b translate="no">' + LABELS[seam.a] + '</b>' + joins +
+      '<b translate="no">' + LABELS[seam.b] + '</b>';
+    if (!seam.breaks) {
+      return { pair: pair, what: 'line on the edge' };
+    }
+    return { pair: pair, what: seam.breaks + (seam.breaks === 1 ? ' pixel' : ' pixels') };
+  }
+
+  function refreshSeams() {
+    if (!panel) {
+      return;
+    }
+    var box = panel.querySelector('.tt-seams');
+    var btn = panel.querySelector('.tt-seam-check span');
+    btn.textContent = seamsOn ? 'Hide seam check' : 'Check my seams';
+    box.style.display = seamsOn ? 'block' : 'none';
+    if (!seamsOn || !hasFullSet()) {
+      seamMarks = [];
+      dropOutline();
+      return;
+    }
+    var result = checkSeams(currentBase());
+    seamMarks = [];
+    result.seams.forEach(function (seam) {
+      seamMarks = seamMarks.concat(seam.marks);
+    });
+
+    var head;
+    var cls = 'tt-seams-head';
+    if (result.checked < 2) {
+      head = 'Draw at least two tiles, then check again.';
+    } else if (!result.seams.length) {
+      head = 'Every seam lines up.';
+      cls += ' tt-seams-good';
+    } else {
+      head = result.seams.length === 1 ? '1 seam does not line up' :
+        result.seams.length + ' seams do not line up';
+      cls += ' tt-seams-bad';
+    }
+    var html = '<div class="' + cls + '">' + head + '</div>';
+    result.seams.forEach(function (seam) {
+      var says = seamSays(seam);
+      html += '<button type="button" class="tt-seam-row" data-frame="' + (currentBase() + seam.a) + '">' +
+        '<span>' + says.pair + '</span><span class="tt-seam-count">' + says.what + '</span></button>';
+    });
+    if (result.empty.length && result.checked >= 2) {
+      html += '<div class="tt-seams-note">Not checked, still empty: <span translate="no">' +
+        result.empty.map(function (p) { return LABELS[p]; }).join(', ') + '</span></div>';
+    }
+    if (box.innerHTML !== html) {
+      box.innerHTML = html;
+    }
+    dropOutline();
+  }
+
+  function setSeamsOn(on) {
+    seamsOn = on;
+    clearInterval(seamTimer);
+    seamTimer = null;
+    if (on) {
+      seamPhase = 0;
+      seamTimer = setInterval(function () {
+        seamPhase = (seamPhase + 1) % 3;
+        dropOutline();
+      }, SEAM_FLASH_MS);
+    }
+    refreshSeams();
+  }
+
   // ── Mirror ─────────────────────────────────────────────────────
   // A set drawn for a symmetric material only needs three of its eight
   // outer tiles: one corner, one top or bottom edge, one side edge. The
@@ -869,6 +1113,7 @@
   var ICON_MIRROR = '<svg viewBox="0 0 16 16"><path d="M8 1.5v13M5.5 4.5 2 8l3.5 3.5zM10.5 4.5 14 8l-3.5 3.5z"/></svg>';
   var ICON_COPY = '<svg viewBox="0 0 16 16"><rect x="2" y="2" width="8.5" height="8.5" rx="1"/>' +
     '<path d="M5.5 13.5h7a1 1 0 0 0 1-1v-7"/></svg>';
+  var ICON_SEAM = '<svg viewBox="0 0 16 16"><path d="M8 1.5v2M8 5.5v2M8 9.5v2M8 13v1.5M2 5h3.5M10.5 5H14M2 11h3.5M10.5 9H14"/></svg>';
   var ICON_PLUS = '<svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg>';
 
   // Tiles that are each other flipped. The center has no partner.
@@ -1034,6 +1279,9 @@
     // The frame list redraws on its own clock, and the new set is usually
     // below the fold.
     setTimeout(function () {
+      // Set gaps first. They move every tile below them, and scrolling
+      // before they are in place lands on the wrong spot.
+      badgeFrameList();
       var tile = document.querySelector('#preview-list .preview-tile.selected');
       if (tile && tile.scrollIntoView) {
         tile.scrollIntoView({ block: 'nearest' });
@@ -1069,7 +1317,11 @@
       '<button type="button" class="tt-duplicate tt-action" ' +
       'title="Copy all 9 tiles into a new set, right after this one">' +
       ICON_COPY + '<span>Duplicate this set</span></button>' +
+      '<button type="button" class="tt-seam-check tt-action" ' +
+      'title="Flash the pixels where one tile does not continue into the tile next to it. Nothing is changed.">' +
+      ICON_SEAM + '<span>Check my seams</span></button>' +
       '  </div>' +
+      '  <div class="tt-seams" style="display:none"></div>' +
       '</div>';
     host.parentNode.insertBefore(panel, host.nextSibling);
 
@@ -1089,6 +1341,15 @@
     });
 
     panel.querySelector('.tt-duplicate').addEventListener('click', duplicateSet);
+    panel.querySelector('.tt-seam-check').addEventListener('click', function () {
+      setSeamsOn(!seamsOn);
+    });
+    panel.querySelector('.tt-seams').addEventListener('click', function (evt) {
+      var row = evt.target.closest && evt.target.closest('.tt-seam-row');
+      if (row) {
+        controller().setCurrentFrameIndex(+row.getAttribute('data-frame'));
+      }
+    });
     panel.querySelector('.tt-mirror-empty').addEventListener('click', function () {
       mirror(emptyPairs(currentBase()));
     });
@@ -1277,6 +1538,19 @@
       '#tt-panel .tt-action:disabled { color: #777; border-color: #3a3a3a; background: #2a2a2a;',
       '  cursor: default; }',
       '#tt-panel .tt-make-frames { margin-top: 6px; }',
+      '#tt-panel .tt-seams { margin-top: 8px; padding-top: 8px; border-top: 1px solid #3a3a3a;',
+      '  font-size: 11px; max-height: 132px; overflow-y: auto; }',
+      '#tt-panel .tt-seams-head { margin-bottom: 4px; font-weight: bold; color: #d3d3d3; }',
+      '#tt-panel .tt-seams-good { color: #7ddc8a; }',
+      '#tt-panel .tt-seams-bad { color: #ff8ad8; }',
+      '#tt-panel .tt-seam-row { display: flex; justify-content: space-between; box-sizing: border-box;',
+      '  width: 100%; margin: 0; padding: 2px 5px; font-family: inherit; font-size: 11px;',
+      '  line-height: 16px; text-align: left; color: #bdbdbd; background: none; border: 0;',
+      '  border-radius: 3px; cursor: pointer; }',
+      '#tt-panel .tt-seam-row:hover { color: #fff; background: #3a3a3a; }',
+      '#tt-panel .tt-seam-row b { color: #ffd93d; }',
+      '#tt-panel .tt-seam-count { flex: none; margin-left: 6px; color: #8a8a8a; white-space: nowrap; }',
+      '#tt-panel .tt-seams-note { margin-top: 4px; color: #8a8a8a; }',
       '.preview-tile { position: relative; }',
       '.tt-badge { position: absolute; bottom: 2px; left: 2px; background: rgba(0,0,0,.7);',
       '  color: #ffd93d; font-size: 9px; font-weight: bold; padding: 0 3px; border-radius: 2px;',
