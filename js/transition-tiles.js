@@ -886,6 +886,44 @@
 
   // ── 3. Frame badges ────────────────────────────────────────────
 
+  // Sets are marked with classes and one child label per set, never with
+  // extra list items: the list is a jQuery sortable and piskel maps a tile
+  // to its frame by position among its siblings.
+  function markSet(tile, index, count) {
+    var inSet = isEnabled() && bankComplete(bankBase(index));
+    // Frames past the last whole set. Only worth saying when there IS a set
+    // above them to be told apart from.
+    var loose = isEnabled() && !inSet && index >= 9 && index === bankBase(index);
+    var setNo = Math.floor(index / 9) + 1;
+
+    tile.classList.toggle('tt-in-set', inSet);
+    tile.classList.toggle('tt-set-alt', inSet && setNo % 2 === 0);
+    tile.classList.toggle('tt-set-start', (inSet && index % 9 === 0) || loose);
+    tile.classList.toggle('tt-set-end', inSet && index % 9 === 8);
+
+    var label = tile.querySelector('.tt-set-label');
+    var text = '';
+    if (inSet && index % 9 === 0) {
+      text = 'Set ' + setNo;
+    } else if (loose) {
+      text = count - index === 1 ? 'Extra frame' : 'Extra frames';
+    }
+    if (!text) {
+      if (label) {
+        label.parentNode.removeChild(label);
+      }
+      return;
+    }
+    if (!label) {
+      label = document.createElement('span');
+      label.className = 'tt-set-label';
+      tile.appendChild(label);
+    }
+    if (label.textContent !== text) {
+      label.textContent = text;
+    }
+  }
+
   function badgeFrameList() {
     var list = document.getElementById('preview-list');
     if (!list) {
@@ -893,6 +931,7 @@
     }
     var tiles = list.querySelectorAll('.preview-tile');
     for (var i = 0; i < tiles.length; i++) {
+      markSet(tiles[i], i, tiles.length);
       var badge = tiles[i].querySelector('.tt-badge');
       if (isEnabled() && bankComplete(bankBase(i))) {
         if (!badge) {
@@ -985,6 +1024,20 @@
       '.tt-badge { position: absolute; bottom: 2px; left: 2px; background: rgba(0,0,0,.7);',
       '  color: #ffd93d; font-size: 9px; font-weight: bold; padding: 0 3px; border-radius: 2px;',
       '  pointer-events: none; z-index: 5; }',
+      '#preview-list .preview-tile.tt-set-start { margin-top: 26px; }',
+      '.tt-set-label { position: absolute; top: -22px; left: -3px; right: -3px; height: 16px;',
+      '  font-size: 11px; line-height: 16px; font-weight: bold; letter-spacing: .04em;',
+      '  text-transform: uppercase; color: #ffd93d; white-space: nowrap; pointer-events: none; }',
+      '.tt-set-alt .tt-set-label, .tt-set-alt .tt-badge { color: #5fc9f3; }',
+      '.preview-tile:not(.tt-in-set) .tt-set-label { color: #888; }',
+      // The rail runs through the gaps between tiles, so a set reads as one
+      // block, and stops short at both ends.
+      '.preview-tile.tt-in-set:before { content: ""; position: absolute; right: -9px; width: 3px;',
+      '  top: -8px; bottom: -8px; background: #ffd93d; }',
+      '.preview-tile.tt-in-set.tt-set-alt:before { background: #5fc9f3; }',
+      '.preview-tile.tt-in-set.tt-set-start:before { top: -3px; border-radius: 2px 2px 0 0; }',
+      '.preview-tile.tt-in-set.tt-set-end:before { bottom: -3px; border-radius: 0 0 2px 2px; }',
+      '.preview-tile.tt-in-set.selected:after { z-index: 2; }',
       '.tt-hover { position: absolute; display: none; pointer-events: none; z-index: 20;',
       '  box-sizing: border-box; background: rgba(255,255,255,.3);',
       '  border: 1px solid rgba(0,0,0,.45); }',
