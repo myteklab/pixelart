@@ -33,6 +33,8 @@
   var pollCount = 0;
 
   var STORAGE_KEY = 'pixelart-transition-tiles';
+  // Piskel's own selection green (selected frame, selected tool).
+  var ACCENT = '#00f900';
   var LABELS = ['TL', 'T', 'TR', 'L', 'C', 'R', 'BL', 'B', 'BR'];
 
   var exportPrefilled = false;
@@ -294,8 +296,12 @@
       // Sits in the pixel row just outside the tile, so it never covers art
       // on the tile being drawn.
       if (drawsOutline) {
-        ctx.strokeStyle = '#ffd93d';
+        // Dark line outside the green one. Green alone is lost on grass,
+        // which is what most tilesets are made of.
         ctx.lineWidth = 1;
+        ctx.strokeStyle = 'rgba(0, 0, 0, .7)';
+        ctx.strokeRect(col * tw - 1.5, row * th - 1.5, tw + 3, th + 3);
+        ctx.strokeStyle = ACCENT;
         ctx.strokeRect(col * tw - 0.5, row * th - 0.5, tw + 1, th + 1);
         drawSeamMarks(ctx, z, tw, th);
       }
@@ -676,8 +682,11 @@
     }
     var rel = pc.getCurrentFrameIndex() - base;
     if (rel >= 0 && rel <= 8) {
-      sctx.strokeStyle = '#ffd93d';
-      sctx.lineWidth = Math.max(1, Math.round(tw / 16));
+      var lw = Math.max(1, Math.round(tw / 16));
+      sctx.lineWidth = lw;
+      sctx.strokeStyle = 'rgba(0, 0, 0, .7)';
+      sctx.strokeRect((rel % 3) * tw + 0.5 + lw, Math.floor(rel / 3) * th + 0.5 + lw, tw - 1 - 2 * lw, th - 1 - 2 * lw);
+      sctx.strokeStyle = ACCENT;
       sctx.strokeRect((rel % 3) * tw + 0.5, Math.floor(rel / 3) * th + 0.5, tw - 1, th - 1);
     }
   }
@@ -874,20 +883,24 @@
   // project: the marks are painted on the tool overlay at render time, so
   // they cannot reach a save, an export, a preview, or a collaborator.
 
-  // Same distance the single-tile tiling check uses, so the two agree on
-  // what counts as a different color.
-  var SEAM_DIST = 60;
   var SEAM_FLASH_MS = 360;
   // Owned by the platform's tiling helper. Its flashing marks are not art.
   var HELPER_LAYER = 'AI: fix these';
+  // Colors closer than this are one color to the check. Hand-picked
+  // palettes keep their shades further apart than that (the closest pair in
+  // the tileset this was tuned on is 40), while soft shading and imported
+  // art with dozens of near-identical shades collapse into a few.
+  var SAME_COLOR = 24;
+  // Texture: a patch of one color this small, counting diagonal touches.
+  var SPECK_MAX = 2;
 
-  // [tile A, side of A, tile B, side of B]. The first twelve are the seams
+  // [tile A, direction to B, tile B]. The first twelve are the seams
   // inside the sheet. The rest are tiles that repeat against themselves on
   // a real map: edges run along their own direction, the center both ways.
   var SEAMS = [
-    [0, 'r', 1, 'l'], [1, 'r', 2, 'l'], [3, 'r', 4, 'l'], [4, 'r', 5, 'l'], [6, 'r', 7, 'l'], [7, 'r', 8, 'l'],
-    [0, 'b', 3, 't'], [3, 'b', 6, 't'], [1, 'b', 4, 't'], [4, 'b', 7, 't'], [2, 'b', 5, 't'], [5, 'b', 8, 't'],
-    [1, 'r', 1, 'l'], [7, 'r', 7, 'l'], [3, 'b', 3, 't'], [5, 'b', 5, 't'], [4, 'r', 4, 'l'], [4, 'b', 4, 't']
+    [0, 'r', 1], [1, 'r', 2], [3, 'r', 4], [4, 'r', 5], [6, 'r', 7], [7, 'r', 8],
+    [0, 'b', 3], [3, 'b', 6], [1, 'b', 4], [4, 'b', 7], [2, 'b', 5], [5, 'b', 8],
+    [1, 'r', 1], [7, 'r', 7], [3, 'b', 3], [5, 'b', 5], [4, 'r', 4], [4, 'b', 4]
   ];
 
   var seamsOn = false;
@@ -929,61 +942,202 @@
     return Math.sqrt(dr * dr + dg * dg + db * db);
   }
 
-  // Where pixel i of an edge sits, depth pixels in from that edge.
-  function edgeXY(t, side, i, depth) {
-    if (side === 'r') { return { x: t.w - 1 - depth, y: i }; }
-    if (side === 'l') { return { x: depth, y: i }; }
-    if (side === 'b') { return { x: i, y: t.h - 1 - depth }; }
-    return { x: i, y: depth };
-  }
-
-  function edgePx(t, side, i, depth) {
-    var at = edgeXY(t, side, i, depth);
-    return t.px[at.y * t.w + at.x];
-  }
-
-  function edgeLen(t, side) {
-    return side === 'r' || side === 'l' ? t.h : t.w;
-  }
-
-  // A lone pixel of texture that happens to sit on the edge. It differs
-  // from everything around it in its own tile, so the seam did not cause
-  // it. A line that RUNS INTO the edge is not a speck: the pixel behind it
-  // matches, and that is exactly the thing that has to continue next door.
-  function isSpeck(t, side, i) {
-    var p = edgePx(t, side, i, 0);
-    var n = edgeLen(t, side);
-    return colorDist(p, edgePx(t, side, i, 1)) > SEAM_DIST &&
-      (i === 0 || colorDist(p, edgePx(t, side, i - 1, 0)) > SEAM_DIST) &&
-      (i === n - 1 || colorDist(p, edgePx(t, side, i + 1, 0)) > SEAM_DIST);
-  }
-
-  // A border drawn along the edge: most of the edge differs from the row
-  // behind it. Two tiles that both have one match each other pixel for
-  // pixel and still show as a double line on the map.
-  function hasEdgeLine(t, side) {
-    var n = edgeLen(t, side);
-    var hits = 0;
-    for (var i = 0; i < n; i++) {
-      var p = edgePx(t, side, i, 0);
-      if ((p >>> 24) && colorDist(p, edgePx(t, side, i, 1)) > SEAM_DIST) {
-        hits++;
+  // The two tiles of a seam laid against each other as one picture, with
+  // every pixel replaced by the number of its color class. Working on the
+  // pair means a shape that crosses the seam is measured whole.
+  function seamStrip(a, b, dir) {
+    var w = a.w;
+    var h = a.h;
+    var W = dir === 'r' ? 2 * w : w;
+    var H = dir === 'r' ? h : 2 * h;
+    var raw = new Uint32Array(W * H);
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        raw[y * W + x] = a.px[y * w + x];
+        if (dir === 'r') {
+          raw[y * W + x + w] = b.px[y * w + x];
+        } else {
+          raw[(y + h) * W + x] = b.px[y * w + x];
+        }
       }
     }
-    return hits >= n * 0.75;
+    // Most used colors become the class representatives.
+    var count = {};
+    var i;
+    for (i = 0; i < raw.length; i++) {
+      count[raw[i]] = (count[raw[i]] || 0) + 1;
+    }
+    var colors = Object.keys(count).map(Number).sort(function (p, q) { return count[q] - count[p]; });
+    var reps = [];
+    var classOf = {};
+    colors.forEach(function (c) {
+      for (var r = 0; r < reps.length; r++) {
+        if (colorDist(c, reps[r]) <= SAME_COLOR) {
+          classOf[c] = r;
+          return;
+        }
+      }
+      classOf[c] = reps.length;
+      reps.push(c);
+    });
+    var cls = new Int32Array(W * H);
+    for (i = 0; i < raw.length; i++) {
+      cls[i] = classOf[raw[i]];
+    }
+    return { W: W, H: H, cls: cls };
+  }
+
+  // Texture out, structure kept. Specks share their colors with the real
+  // shapes (the dark water of a shoreline is also the dark fleck in open
+  // water), so color cannot tell them apart. Size can.
+  function dropSpecks(strip) {
+    var W = strip.W;
+    var H = strip.H;
+    var cls = strip.cls;
+    var size = new Int32Array(W * H);
+    var seen = new Uint8Array(W * H);
+    var i;
+    var dx;
+    var dy;
+    for (i = 0; i < W * H; i++) {
+      if (seen[i]) {
+        continue;
+      }
+      var stack = [i];
+      var members = [];
+      seen[i] = 1;
+      while (stack.length) {
+        var p = stack.pop();
+        members.push(p);
+        var px = p % W;
+        var py = (p - px) / W;
+        // Diagonals count. A band that wanders one pixel sideways per row
+        // is still one band.
+        for (dy = -1; dy <= 1; dy++) {
+          for (dx = -1; dx <= 1; dx++) {
+            var nx = px + dx;
+            var ny = py + dy;
+            if ((dx || dy) && nx >= 0 && ny >= 0 && nx < W && ny < H) {
+              var q = ny * W + nx;
+              if (!seen[q] && cls[q] === cls[p]) {
+                seen[q] = 1;
+                stack.push(q);
+              }
+            }
+          }
+        }
+      }
+      for (var m = 0; m < members.length; m++) {
+        size[members[m]] = members.length;
+      }
+    }
+    var out = new Int32Array(cls);
+    for (i = 0; i < W * H; i++) {
+      if (size[i] > SPECK_MAX) {
+        continue;
+      }
+      var x = i % W;
+      var y = (i - x) / W;
+      var votes = {};
+      var best = -1;
+      var bestVotes = 0;
+      for (dy = -1; dy <= 1; dy++) {
+        for (dx = -1; dx <= 1; dx++) {
+          var vx = x + dx;
+          var vy = y + dy;
+          if ((dx || dy) && vx >= 0 && vy >= 0 && vx < W && vy < H && size[vy * W + vx] > SPECK_MAX) {
+            var c = cls[vy * W + vx];
+            votes[c] = (votes[c] || 0) + (dx && dy ? 1 : 2);
+            if (votes[c] > bestVotes) {
+              bestVotes = votes[c];
+              best = c;
+            }
+          }
+        }
+      }
+      if (best !== -1) {
+        out[i] = best;
+      }
+    }
+    return out;
+  }
+
+  // One seam. For each position along it: the pixel on A's edge, the one
+  // on B's edge, and the pixel behind each.
+  function checkSeam(a, b, dir, posA, posB) {
+    var strip = seamStrip(a, b, dir);
+    var cls = dropSpecks(strip);
+    var W = strip.W;
+    var n = dir === 'r' ? a.h : a.w;
+    var rows = [];
+    var k;
+    for (k = 0; k < n; k++) {
+      var at = dir === 'r' ? k * W + a.w - 1 : (a.h - 1) * W + k;
+      var step = dir === 'r' ? 1 : W;
+      rows.push({ a: cls[at], b: cls[at + step], behindA: cls[at - step], behindB: cls[at + 2 * step] });
+    }
+    // Anything that holds for this long is running ALONG the seam.
+    var along = Math.max(4, Math.ceil(n / 4));
+    var marks = [];
+    var breaks = 0;
+    var line = false;
+    var from = 0;
+    while (from < n) {
+      var to = from;
+      while (to + 1 < n && rows[to + 1].a === rows[from].a && rows[to + 1].b === rows[from].b) {
+        to++;
+      }
+      var r = rows[from];
+      var len = to - from + 1;
+      // A stripe sitting on the seam with the same material on both sides
+      // of it. One pixel wide on either tile, or two wide across both.
+      var stripe = r.a === r.b ?
+        (r.behindA !== r.a && r.behindB !== r.b && r.behindA === r.behindB) :
+        ((r.behindA === r.b && r.behindA !== r.a) || (r.behindB === r.a && r.behindB !== r.b));
+      var kind = '';
+      if (stripe && len >= along) {
+        kind = 'line';
+      } else if (r.a !== r.b && len < along) {
+        kind = 'break';
+      }
+      // What is left over is either a match, or two materials meeting
+      // exactly on the seam for a long stretch, which is a fair way to
+      // draw a set.
+      if (kind) {
+        for (k = from; k <= to; k++) {
+          var ax = dir === 'r' ? a.w - 1 : k;
+          var ay = dir === 'r' ? k : a.h - 1;
+          var bx = dir === 'r' ? 0 : k;
+          var by = dir === 'r' ? k : 0;
+          if (kind === 'break' || r.a !== r.behindA) {
+            marks.push({ pos: posA, at: { x: ax, y: ay } });
+          }
+          if (kind === 'break' || r.b !== r.behindB) {
+            marks.push({ pos: posB, at: { x: bx, y: by } });
+          }
+        }
+        if (kind === 'break') {
+          breaks += len;
+        } else {
+          line = true;
+        }
+      }
+      from = to + 1;
+    }
+    return { a: posA, b: posB, breaks: breaks, line: line, stacked: dir === 'b', marks: marks, length: n };
   }
 
   function checkSeams(base) {
     var tiles = [];
     var empty = [];
-    var i;
-    for (i = 0; i < 9; i++) {
+    for (var i = 0; i < 9; i++) {
       tiles.push(mergedTile(base + i));
       if (tiles[i].empty) {
         empty.push(i);
       }
     }
     var found = [];
+    var wrecked = 0;
     SEAMS.forEach(function (seam) {
       var a = tiles[seam[0]];
       var b = tiles[seam[2]];
@@ -991,33 +1145,19 @@
       if (a.empty || b.empty) {
         return;
       }
-      var marks = [];
-      var breaks = 0;
-      var n = edgeLen(a, seam[1]);
-      for (var k = 0; k < n; k++) {
-        if (colorDist(edgePx(a, seam[1], k, 0), edgePx(b, seam[3], k, 0)) > SEAM_DIST &&
-            !isSpeck(a, seam[1], k) && !isSpeck(b, seam[3], k)) {
-          breaks++;
-          marks.push({ pos: seam[0], at: edgeXY(a, seam[1], k, 0) });
-          marks.push({ pos: seam[2], at: edgeXY(b, seam[3], k, 0) });
+      var result = checkSeam(a, b, seam[1], seam[0], seam[2]);
+      if (result.marks.length) {
+        found.push(result);
+        if (seam[0] !== seam[2] && result.breaks >= result.length / 4) {
+          wrecked++;
         }
-      }
-      var lineA = hasEdgeLine(a, seam[1]);
-      var lineB = hasEdgeLine(b, seam[3]);
-      if (!breaks && (lineA || lineB)) {
-        for (k = 0; k < n; k++) {
-          if (lineA) { marks.push({ pos: seam[0], at: edgeXY(a, seam[1], k, 0) }); }
-          if (lineB) { marks.push({ pos: seam[2], at: edgeXY(b, seam[3], k, 0) }); }
-        }
-      }
-      if (marks.length) {
-        found.push({
-          a: seam[0], b: seam[2], breaks: breaks, line: lineA || lineB,
-          stacked: seam[1] === 'b', marks: marks
-        });
       }
     });
-    return { seams: found, empty: empty, checked: 9 - empty.length };
+    // Nine unrelated tiles (trees, rocks, signs) kept in one bank. Every
+    // edge differs from its neighbor and none of it is a mistake.
+    // Half of the twelve inner seams each broken along a quarter of their
+    // length is not a set with mistakes in it.
+    return { seams: found, empty: empty, checked: 9 - empty.length, unrelated: wrecked >= 6 };
   }
 
   function drawSeamMarks(ctx, z, tw, th) {
@@ -1059,14 +1199,18 @@
     }
     var result = checkSeams(currentBase());
     seamMarks = [];
-    result.seams.forEach(function (seam) {
-      seamMarks = seamMarks.concat(seam.marks);
-    });
+    if (!result.unrelated) {
+      result.seams.forEach(function (seam) {
+        seamMarks = seamMarks.concat(seam.marks);
+      });
+    }
 
     var head;
     var cls = 'tt-seams-head';
     if (result.checked < 2) {
       head = 'Draw at least two tiles, then check again.';
+    } else if (result.unrelated) {
+      head = 'These 9 tiles do not look like one transition set, so there are no seams to check.';
     } else if (!result.seams.length) {
       head = 'Every seam lines up.';
       cls += ' tt-seams-good';
@@ -1076,12 +1220,26 @@
       cls += ' tt-seams-bad';
     }
     var html = '<div class="' + cls + '">' + head + '</div>';
-    result.seams.forEach(function (seam) {
-      var says = seamSays(seam);
-      html += '<button type="button" class="tt-seam-row" data-frame="' + (currentBase() + seam.a) + '">' +
-        '<span>' + says.pair + '</span><span class="tt-seam-count">' + says.what + '</span></button>';
-    });
-    if (result.empty.length && result.checked >= 2) {
+    var between = [];
+    var repeated = [];
+    if (!result.unrelated) {
+      result.seams.forEach(function (seam) {
+        (seam.a === seam.b ? repeated : between).push(seam);
+      });
+    }
+    var rowsOf = function (list) {
+      return list.map(function (seam) {
+        var says = seamSays(seam);
+        return '<button type="button" class="tt-seam-row" data-frame="' + (currentBase() + seam.a) + '">' +
+          '<span>' + says.pair + '</span><span class="tt-seam-count">' + says.what + '</span></button>';
+      }).join('');
+    };
+    html += rowsOf(between);
+    if (repeated.length) {
+      html += '<div class="tt-seams-cap" title="On a map wider or taller than 3 tiles, edge tiles and ' +
+        'the center are placed next to copies of themselves.">When a tile repeats</div>' + rowsOf(repeated);
+    }
+    if (result.empty.length && result.checked >= 2 && !result.unrelated) {
       html += '<div class="tt-seams-note">Not checked, still empty: <span translate="no">' +
         result.empty.map(function (p) { return LABELS[p]; }).join(', ') + '</span></div>';
     }
@@ -1522,7 +1680,7 @@
       '  border-left: 1px solid #4a4a4a; cursor: pointer; white-space: nowrap; }',
       '#tt-panel .tt-seg button:first-child { border-left: 0; }',
       '#tt-panel .tt-seg button:hover { color: #fff; background: #3a3a3a; }',
-      '#tt-panel .tt-seg button.tt-reach-on { color: #1d1d1d; background: #ffd93d; font-weight: bold; }',
+      '#tt-panel .tt-seg button.tt-reach-on { color: #1d1d1d; background: ' + ACCENT + '; font-weight: bold; }',
       '#tt-panel .tt-actions { display: flex; flex-direction: column; margin-top: 8px;',
       '  padding-top: 8px; border-top: 1px solid #3a3a3a; }',
       '#tt-panel .tt-action { display: flex; align-items: center; box-sizing: border-box; width: 100%;',
@@ -1534,7 +1692,7 @@
       '#tt-panel .tt-action svg { flex: none; width: 14px; height: 14px; margin-right: 6px;',
       '  fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linejoin: round;',
       '  stroke-linecap: round; }',
-      '#tt-panel .tt-action:hover { color: #fff; border-color: #ffd93d; }',
+      '#tt-panel .tt-action:hover { color: #fff; border-color: ' + ACCENT + '; }',
       '#tt-panel .tt-action:disabled { color: #777; border-color: #3a3a3a; background: #2a2a2a;',
       '  cursor: default; }',
       '#tt-panel .tt-make-frames { margin-top: 6px; }',
@@ -1548,9 +1706,11 @@
       '  line-height: 16px; text-align: left; color: #bdbdbd; background: none; border: 0;',
       '  border-radius: 3px; cursor: pointer; }',
       '#tt-panel .tt-seam-row:hover { color: #fff; background: #3a3a3a; }',
-      '#tt-panel .tt-seam-row b { color: #ffd93d; }',
+      '#tt-panel .tt-seam-row b { color: ' + ACCENT + '; }',
       '#tt-panel .tt-seam-count { flex: none; margin-left: 6px; color: #8a8a8a; white-space: nowrap; }',
       '#tt-panel .tt-seams-note { margin-top: 4px; color: #8a8a8a; }',
+      '#tt-panel .tt-seams-cap { margin: 6px 0 2px; font-size: 10px; letter-spacing: .06em;',
+      '  text-transform: uppercase; color: #8a8a8a; cursor: help; }',
       '.preview-tile { position: relative; }',
       '.tt-badge { position: absolute; bottom: 2px; left: 2px; background: rgba(0,0,0,.7);',
       '  color: #ffd93d; font-size: 9px; font-weight: bold; padding: 0 3px; border-radius: 2px;',
@@ -1602,6 +1762,11 @@
       $.subscribe(ev, function () {
         if (!isEnabled()) {
           return;
+        }
+        if (ev === Events.FRAME_SIZE_CHANGED) {
+          // Piskel has just zoomed to fit one frame of the new size.
+          cache = {};
+          fitSheet();
         }
         trackFrameChange();
         renderSheet(false);
