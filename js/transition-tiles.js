@@ -35,6 +35,8 @@
   var STORAGE_KEY = 'pixelart-transition-tiles';
   // Piskel's own selection green (selected frame, selected tool).
   var ACCENT = '#00f900';
+  // Every other set in the frame list, so two neighbors still differ.
+  var ACCENT_ALT = '#00a35c';
   var LABELS = ['TL', 'T', 'TR', 'L', 'C', 'R', 'BL', 'B', 'BR'];
 
   var exportPrefilled = false;
@@ -904,6 +906,7 @@
   ];
 
   var seamsOn = false;
+  var seamPick = '';    // the one seam whose marks are showing, when a row is picked
   var seamMarks = [];   // {pos, x, y} within the current set
   var seamPhase = 0;
   var seamTimer = null;
@@ -1064,7 +1067,86 @@
 
   // One seam. For each position along it: the pixel on A's edge, the one
   // on B's edge, and the pixel behind each.
-  function checkSeam(a, b, dir, posA, posB) {
+  // Which pixels of one tile are patches of SPECK_MAX or fewer.
+  function fleckMask(px, w, h) {
+    var mask = new Uint8Array(w * h);
+    var seen = new Uint8Array(w * h);
+    for (var i = 0; i < w * h; i++) {
+      if (seen[i]) {
+        continue;
+      }
+      var stack = [i];
+      var members = [];
+      seen[i] = 1;
+      while (stack.length) {
+        var p = stack.pop();
+        members.push(p);
+        var x = p % w;
+        var y = (p - x) / w;
+        for (var dy = -1; dy <= 1; dy++) {
+          for (var dx = -1; dx <= 1; dx++) {
+            var nx = x + dx;
+            var ny = y + dy;
+            if ((dx || dy) && nx >= 0 && ny >= 0 && nx < w && ny < h) {
+              var q = ny * w + nx;
+              if (!seen[q] && px[q] === px[p]) {
+                seen[q] = 1;
+                stack.push(q);
+              }
+            }
+          }
+        }
+      }
+      if (members.length <= SPECK_MAX) {
+        for (var m = 0; m < members.length; m++) {
+          mask[members[m]] = 1;
+        }
+      }
+    }
+    return mask;
+  }
+
+  // A fleck that touches a band of its own color is part of that band as
+  // far as size can tell, and it gets reported as the band sticking out.
+  // Tilesets are usually made by stamping one texture into every tile and
+  // drawing the transition over it, so the same flecks sit at the same
+  // place in tile after tile. Two references: what most tiles have at each
+  // position (the outer material, it covers most of 8 tiles), and the
+  // center tile (the inner material). A set with no shared texture gives
+  // references with no flecks in them, and nothing is excused.
+  function textureOf(tiles) {
+    var w = tiles[0].w;
+    var h = tiles[0].h;
+    var drawn = tiles.filter(function (t) { return !t.empty; });
+    var common = new Uint32Array(w * h);
+    var known = new Uint8Array(w * h);
+    for (var i = 0; i < w * h; i++) {
+      var count = {};
+      for (var t = 0; t < drawn.length; t++) {
+        var c = drawn[t].px[i];
+        count[c] = (count[c] || 0) + 1;
+        if (count[c] >= 4) {
+          common[i] = c;
+          known[i] = 1;
+        }
+      }
+    }
+    var refs = [{ px: common, known: known, fleck: fleckMask(common, w, h) }];
+    if (!tiles[4].empty) {
+      refs.push({ px: tiles[4].px, known: null, fleck: fleckMask(tiles[4].px, w, h) });
+    }
+    return function (tile, x, y) {
+      var at = y * w + x;
+      for (var r = 0; r < refs.length; r++) {
+        if (refs[r].fleck[at] && (!refs[r].known || refs[r].known[at]) && refs[r].px[at] === tile.px[at]) {
+          return true;
+        }
+      }
+      return false;
+    };
+  }
+
+  function checkSeam(a, b, dir, posA, posB, isTexture) {
     var strip = seamStrip(a, b, dir);
     var cls = dropSpecks(strip);
     var W = strip.W;
@@ -1109,6 +1191,12 @@
           var ay = dir === 'r' ? k : a.h - 1;
           var bx = dir === 'r' ? 0 : k;
           var by = dir === 'r' ? k : 0;
+          if (kind === 'break') {
+            if (isTexture(a, ax, ay) || isTexture(b, bx, by)) {
+              continue;
+            }
+            breaks++;
+          }
           if (kind === 'break' || r.a !== r.behindA) {
             marks.push({ pos: posA, at: { x: ax, y: ay } });
           }
@@ -1116,9 +1204,7 @@
             marks.push({ pos: posB, at: { x: bx, y: by } });
           }
         }
-        if (kind === 'break') {
-          breaks += len;
-        } else {
+        if (kind === 'line') {
           line = true;
         }
       }
@@ -1138,6 +1224,7 @@
     }
     var found = [];
     var wrecked = 0;
+    var isTexture = textureOf(tiles);
     SEAMS.forEach(function (seam) {
       var a = tiles[seam[0]];
       var b = tiles[seam[2]];
@@ -1145,7 +1232,7 @@
       if (a.empty || b.empty) {
         return;
       }
-      var result = checkSeam(a, b, seam[1], seam[0], seam[2]);
+      var result = checkSeam(a, b, seam[1], seam[0], seam[2], isTexture);
       if (result.marks.length) {
         found.push(result);
         if (seam[0] !== seam[2] && result.breaks >= result.length / 4) {
@@ -1198,28 +1285,25 @@
       return;
     }
     var result = checkSeams(currentBase());
+    var keyOf = function (seam) {
+      return currentBase() + ':' + seam.a + (seam.stacked ? '/' : '|') + seam.b;
+    };
+    var picked = result.seams.filter(function (seam) { return keyOf(seam) === seamPick; })[0];
+    if (!picked) {
+      seamPick = '';
+    }
+    // A tile's left and right edge flashing at once, in a sheet where it
+    // meets its neighbors perfectly, reads as the check being wrong. Repeat
+    // seams only flash when their own row is picked.
     seamMarks = [];
     if (!result.unrelated) {
       result.seams.forEach(function (seam) {
-        seamMarks = seamMarks.concat(seam.marks);
+        if (picked ? seam === picked : seam.a !== seam.b) {
+          seamMarks = seamMarks.concat(seam.marks);
+        }
       });
     }
 
-    var head;
-    var cls = 'tt-seams-head';
-    if (result.checked < 2) {
-      head = 'Draw at least two tiles, then check again.';
-    } else if (result.unrelated) {
-      head = 'These 9 tiles do not look like one transition set, so there are no seams to check.';
-    } else if (!result.seams.length) {
-      head = 'Every seam lines up.';
-      cls += ' tt-seams-good';
-    } else {
-      head = result.seams.length === 1 ? '1 seam does not line up' :
-        result.seams.length + ' seams do not line up';
-      cls += ' tt-seams-bad';
-    }
-    var html = '<div class="' + cls + '">' + head + '</div>';
     var between = [];
     var repeated = [];
     if (!result.unrelated) {
@@ -1227,17 +1311,33 @@
         (seam.a === seam.b ? repeated : between).push(seam);
       });
     }
+    var head;
+    var cls = 'tt-seams-head';
+    if (result.checked < 2) {
+      head = 'Draw at least two tiles, then check again.';
+    } else if (result.unrelated) {
+      head = 'These 9 tiles do not look like one transition set, so there are no seams to check.';
+    } else if (!between.length) {
+      head = 'Every tile lines up with its neighbors.';
+      cls += ' tt-seams-good';
+    } else {
+      head = between.length === 1 ? '1 seam does not line up' : between.length + ' seams do not line up';
+      cls += ' tt-seams-bad';
+    }
+    var html = '<div class="' + cls + '">' + head + '</div>';
     var rowsOf = function (list) {
       return list.map(function (seam) {
         var says = seamSays(seam);
-        return '<button type="button" class="tt-seam-row" data-frame="' + (currentBase() + seam.a) + '">' +
+        return '<button type="button" class="tt-seam-row' + (seam === picked ? ' tt-seam-picked' : '') +
+          '" data-frame="' + (currentBase() + seam.a) + '" data-seam="' + keyOf(seam) + '">' +
           '<span>' + says.pair + '</span><span class="tt-seam-count">' + says.what + '</span></button>';
       }).join('');
     };
     html += rowsOf(between);
     if (repeated.length) {
-      html += '<div class="tt-seams-cap" title="On a map wider or taller than 3 tiles, edge tiles and ' +
-        'the center are placed next to copies of themselves.">When a tile repeats</div>' + rowsOf(repeated);
+      html += '<div class="tt-seams-cap" title="Only matters on a map wider or taller than 3 tiles, where ' +
+        'an edge tile or the center sits next to a copy of itself. Click a row to see where.">' +
+        'Only if a tile repeats</div>' + rowsOf(repeated);
     }
     if (result.empty.length && result.checked >= 2 && !result.unrelated) {
       html += '<div class="tt-seams-note">Not checked, still empty: <span translate="no">' +
@@ -1505,7 +1605,10 @@
     panel.querySelector('.tt-seams').addEventListener('click', function (evt) {
       var row = evt.target.closest && evt.target.closest('.tt-seam-row');
       if (row) {
+        var key = row.getAttribute('data-seam');
+        seamPick = seamPick === key ? '' : key;
         controller().setCurrentFrameIndex(+row.getAttribute('data-frame'));
+        refreshSeams();
       }
     });
     panel.querySelector('.tt-mirror-empty').addEventListener('click', function () {
@@ -1706,6 +1809,8 @@
       '  line-height: 16px; text-align: left; color: #bdbdbd; background: none; border: 0;',
       '  border-radius: 3px; cursor: pointer; }',
       '#tt-panel .tt-seam-row:hover { color: #fff; background: #3a3a3a; }',
+      '#tt-panel .tt-seam-picked, #tt-panel .tt-seam-picked:hover { color: #fff; background: #3a3a3a;',
+      '  box-shadow: inset 2px 0 0 ' + ACCENT + '; }',
       '#tt-panel .tt-seam-row b { color: ' + ACCENT + '; }',
       '#tt-panel .tt-seam-count { flex: none; margin-left: 6px; color: #8a8a8a; white-space: nowrap; }',
       '#tt-panel .tt-seams-note { margin-top: 4px; color: #8a8a8a; }',
@@ -1713,19 +1818,19 @@
       '  text-transform: uppercase; color: #8a8a8a; cursor: help; }',
       '.preview-tile { position: relative; }',
       '.tt-badge { position: absolute; bottom: 2px; left: 2px; background: rgba(0,0,0,.7);',
-      '  color: #ffd93d; font-size: 9px; font-weight: bold; padding: 0 3px; border-radius: 2px;',
+      '  color: ' + ACCENT + '; font-size: 9px; font-weight: bold; padding: 0 3px; border-radius: 2px;',
       '  pointer-events: none; z-index: 5; }',
       '#preview-list .preview-tile.tt-set-start { margin-top: 26px; }',
       '.tt-set-label { position: absolute; top: -22px; left: -3px; right: -3px; height: 16px;',
       '  font-size: 11px; line-height: 16px; font-weight: bold; letter-spacing: .04em;',
-      '  text-transform: uppercase; color: #ffd93d; white-space: nowrap; pointer-events: none; }',
-      '.tt-set-alt .tt-set-label, .tt-set-alt .tt-badge { color: #5fc9f3; }',
+      '  text-transform: uppercase; color: ' + ACCENT + '; white-space: nowrap; pointer-events: none; }',
+      '.tt-set-alt .tt-set-label, .tt-set-alt .tt-badge { color: ' + ACCENT_ALT + '; }',
       '.preview-tile:not(.tt-in-set) .tt-set-label { color: #888; }',
       // The rail runs through the gaps between tiles, so a set reads as one
       // block, and stops short at both ends.
       '.preview-tile.tt-in-set:before { content: ""; position: absolute; right: -9px; width: 3px;',
-      '  top: -8px; bottom: -8px; background: #ffd93d; }',
-      '.preview-tile.tt-in-set.tt-set-alt:before { background: #5fc9f3; }',
+      '  top: -8px; bottom: -8px; background: ' + ACCENT + '; }',
+      '.preview-tile.tt-in-set.tt-set-alt:before { background: ' + ACCENT_ALT + '; }',
       '.preview-tile.tt-in-set.tt-set-start:before { top: -3px; border-radius: 2px 2px 0 0; }',
       '.preview-tile.tt-in-set.tt-set-end:before { bottom: -3px; border-radius: 0 0 2px 2px; }',
       '.preview-tile.tt-in-set.selected:after { z-index: 2; }',
