@@ -49,6 +49,7 @@
       markNotAnimation();
     }
     syncUi();
+    dropOutline();
     $.publish(Events.PISKEL_RESET);
     if (on) {
       fitSheet();
@@ -58,6 +59,13 @@
       // Hand the camera back to piskel in a legal state.
       try { pskl.app.drawingController.setOffset(0, 0); } catch (e) {}
     }
+  }
+
+  // The tool overlay is cached on zoom, offset and its own pixels. Editing
+  // the center tile has offset 0,0, the same as stock, so leaving the mode
+  // from there would keep the outline on screen until the mouse moved.
+  function dropOutline() {
+    try { pskl.app.drawingController.overlayRenderer.serializedFrame = null; } catch (e) {}
   }
 
   function controller() {
@@ -140,6 +148,16 @@
 
   // ── 1. Edit in context: patch the seamless renderer ────────────
 
+  // Backdrop everywhere except the sheet. Piskel has already cleared one
+  // tile around the frame, which overshoots the sheet whenever the live tile
+  // is on an edge, and with no wash on the tiles the backdrop is the only
+  // thing that shows where the sheet ends.
+  function clearSheet(context, rel, tw, th) {
+    context.fillStyle = Constants.ZOOMED_OUT_BACKGROUND_COLOR;
+    context.fillRect(-4 * tw, -4 * th, 9 * tw, 9 * th);
+    context.clearRect(-(rel % 3) * tw, -Math.floor(rel / 3) * th, 3 * tw, 3 * th);
+  }
+
   function patchTiledFrames() {
     var FrameRenderer = pskl.rendering.frame.FrameRenderer;
     var original = FrameRenderer.prototype.drawTiledFrames_;
@@ -170,7 +188,7 @@
         // zoomed out each renderer fills its whole canvas with the opaque
         // background color and only clears one tile around the frame, which
         // would occlude the sheet drawn on the canvas underneath.
-        context.clearRect(-4 * w * z, -4 * h * z, 9 * w * z, 9 * h * z);
+        clearSheet(context, cur - base, w * z, h * z);
         return;
       }
 
@@ -181,9 +199,7 @@
       // first: the stock clear only covers one tile around the canvas.
       var col = (cur - base) % 3;
       var row = Math.floor((cur - base) / 3);
-      var opacity = pskl.utils.Math.minmax(pskl.UserSettings.get('SEAMLESS_OPACITY'), 0, 1);
-      context.clearRect(-4 * w * z, -4 * h * z, 9 * w * z, 9 * h * z);
-      context.fillStyle = 'rgba(255, 255, 255, ' + opacity + ')';
+      clearSheet(context, cur - base, w * z, h * z);
 
       for (var i = 0; i < 9; i++) {
         if (base + i === cur) {
@@ -195,9 +211,91 @@
         if (!neighbor) {
           continue;
         }
+        // No tile mode wash here. Every tile is drawable, and a wash makes
+        // one color read as two on either side of a seam.
         context.drawImage(neighbor, dx * w * z, dy * h * z, w * z, h * z);
-        context.fillRect(dx * w * z, dy * h * z, w * z, h * z);
       }
+    };
+  }
+
+  // Piskel draws the pixel grid over the current frame only, so with the
+  // frame following the pointer the grid jumped from tile to tile. Run it
+  // over the whole sheet instead, and mark the live tile with an outline.
+  function patchSheetDecor() {
+    var FrameRenderer = pskl.rendering.frame.FrameRenderer;
+    var original = FrameRenderer.prototype.renderFrame_;
+
+    FrameRenderer.prototype.renderFrame_ = function (frame) {
+      original.call(this, frame);
+      var cls = (this.displayCanvas && this.displayCanvas.className) || '';
+      // Grid goes where the tiles are drawn. The outline goes on the tool
+      // overlay, the top canvas of the stack: every canvas paints backdrop
+      // outside the sheet, which would bury an outline on a lower one
+      // wherever the live tile sits on the edge of the sheet.
+      var drawsGrid = cls.indexOf('drawing-canvas') !== -1;
+      var drawsOutline = cls.indexOf('canvas-overlay') !== -1;
+      if ((!drawsGrid && !drawsOutline) || !cameraActive() ||
+          !pskl.UserSettings.get('SEAMLESS_MODE')) {
+        return;
+      }
+      var pc = controller();
+      var rel = pc.getCurrentFrameIndex() - currentBase();
+      var col = rel % 3;
+      var row = Math.floor(rel / 3);
+      var z = this.zoom;
+      var tw = frame.getWidth() * z;
+      var th = frame.getHeight() * z;
+
+      var ctx = this.displayCanvas.getContext('2d');
+      ctx.save();
+      // Origin at the top-left corner of the SHEET, in screen pixels.
+      ctx.translate(this.margin.x - this.offset.x * z - col * tw,
+        this.margin.y - this.offset.y * z - row * th);
+
+      var gridWidth = drawsGrid ? this.computeGridWidthForDisplay_() : 0;
+      if (gridWidth > 0) {
+        var spacing = this.getGridSpacing();
+        var color = this.getGridColor();
+        var line;
+        if (color === Constants.TRANSPARENT_COLOR) {
+          line = ctx.clearRect.bind(ctx);
+        } else {
+          ctx.fillStyle = color;
+          line = ctx.fillRect.bind(ctx);
+        }
+        for (var c = 0; c < 3; c++) {
+          for (var r = 0; r < 3; r++) {
+            if (c === col && r === row) {
+              continue; // piskel already drew this one
+            }
+            for (var i = 1; i < frame.getWidth(); i++) {
+              if (i % spacing === 0) {
+                line(c * tw + i * z - gridWidth / 2, r * th, gridWidth, th);
+              }
+            }
+            for (var j = 1; j < frame.getHeight(); j++) {
+              if (j % spacing === 0) {
+                line(c * tw, r * th + j * z - gridWidth / 2, tw, gridWidth);
+              }
+            }
+          }
+        }
+        // The seams are grid lines too. Stock piskel never needs them
+        // because a lone frame has nothing on the other side of its edge.
+        for (var k = 1; k < 3; k++) {
+          line(k * tw - gridWidth / 2, 0, gridWidth, 3 * th);
+          line(0, k * th - gridWidth / 2, 3 * tw, gridWidth);
+        }
+      }
+
+      // Sits in the pixel row just outside the tile, so it never covers art
+      // on the tile being drawn.
+      if (drawsOutline) {
+        ctx.strokeStyle = '#ffd93d';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(col * tw - 0.5, row * th - 0.5, tw + 1, th + 1);
+      }
+      ctx.restore();
     };
   }
 
@@ -291,6 +389,7 @@
         // frame in an incomplete bank): hand the camera back in a legal
         // state instead of leaving a sheet-view offset behind.
         wasActive = false;
+        dropOutline();
         try { pskl.app.drawingController.setOffset(0, 0); } catch (e) {}
       }
       return;
@@ -796,6 +895,7 @@
     if (ready) {
       injectStyles();
       patchTiledFrames();
+      patchSheetDecor();
       patchOffsetClamp();
       patchPaintAnywhere();
       buildPanel();
