@@ -674,6 +674,107 @@
     }
   }
 
+  // ── Paint-all reach ────────────────────────────────────────────
+  // Stock "paint all pixels of the same color" knows two reaches: the
+  // current frame, or with shift every frame in the project. A project with
+  // several sets needs the one in between, and it is the default here
+  // because the sheet on screen reads as one picture.
+
+  var REACH_KEY = 'pixelart-transition-swap-reach';
+  var REACHES = ['tile', 'set', 'all'];
+
+  function swapReach() {
+    var v = null;
+    try { v = localStorage.getItem(REACH_KEY); } catch (e) {}
+    return REACHES.indexOf(v) === -1 ? 'set' : v;
+  }
+
+  function setSwapReach(v) {
+    try { localStorage.setItem(REACH_KEY, v); } catch (e) {}
+    syncReachUi();
+  }
+
+  function syncReachUi() {
+    if (!panel) {
+      return;
+    }
+    var row = panel.querySelector('.tt-reach');
+    var tool = pskl.app.drawingController && pskl.app.drawingController.currentToolBehavior;
+    var show = !!tool && tool.toolId === 'tool-colorswap' && cameraActive();
+    row.style.display = show ? 'block' : 'none';
+    var reach = swapReach();
+    var buttons = row.querySelectorAll('button');
+    for (var i = 0; i < buttons.length; i++) {
+      var on = buttons[i].getAttribute('data-reach') === reach;
+      buttons[i].className = 'tt-reach-option' + (on ? ' tt-reach-on' : '');
+    }
+  }
+
+  function swapInSet(tool, base, oldColor, newColor, allLayers) {
+    var pc = controller();
+    var layers = allLayers ? pc.getLayers() : [pc.getCurrentLayer()];
+    layers.forEach(function (layer) {
+      for (var i = base; i < base + 9; i++) {
+        var frame = layer.getFrameAt(i);
+        if (frame) {
+          tool.applyToolOnFrame_(frame, oldColor, newColor);
+        }
+      }
+    });
+  }
+
+  function patchColorSwap() {
+    var proto = pskl.tools.drawing.ColorSwap.prototype;
+    var apply = proto.applyToolAt;
+    var replay = proto.replay;
+
+    proto.applyToolAt = function (col, row, frame, overlay, event) {
+      var reach = swapReach();
+      // Shift keeps its stock meaning, so the keyboard habit still works.
+      if (!cameraActive() || event.shiftKey || reach === 'tile') {
+        return apply.call(this, col, row, frame, overlay, event);
+      }
+      if (!frame.containsPixel(col, row)) {
+        return;
+      }
+      var pc = controller();
+      var oldColor = frame.getPixel(col, row);
+      var newColor = this.getToolColor();
+      var allLayers = pskl.utils.UserAgent.isMac ? event.metaKey : event.ctrlKey;
+      var first = 0;
+      var count = pc.getFrameCount();
+      if (reach === 'set') {
+        first = currentBase();
+        count = 9;
+        swapInSet(this, first, oldColor, newColor, allLayers);
+      } else {
+        this.swapColors_(oldColor, newColor, allLayers, true);
+      }
+      for (var i = first; i < first + count; i++) {
+        touched(i);
+      }
+      this.raiseSaveStateEvent({
+        allLayers: allLayers,
+        allFrames: reach === 'all',
+        setBase: reach === 'set' ? first : undefined,
+        oldColor: oldColor,
+        newColor: newColor
+      });
+    };
+
+    proto.replay = function (frame, data) {
+      if (typeof data.setBase === 'number') {
+        return swapInSet(this, data.setBase, data.oldColor, data.newColor, data.allLayers);
+      }
+      return replay.call(this, frame, data);
+    };
+
+    $.subscribe(Events.TOOL_SELECTED, function () {
+      // The drawing controller updates its current tool from the same event.
+      setTimeout(syncReachUi, 0);
+    });
+  }
+
   // Runs against the inner controller: the public one records every frame
   // operation as its own history step, and nine undos for one button press
   // is not what anyone means by undo.
@@ -732,6 +833,10 @@
       'Each frame is one tile of the 3x3 set. <button type="button" class="tt-make-frames button">Add frames to finish this set</button></div>' +
       '<div class="tt-body">' +
       '  <canvas class="tt-sheet" title="Click a tile to edit it"></canvas>' +
+      '  <div class="tt-reach" style="display:none">Paint all changes ' +
+      '<button type="button" data-reach="tile">this tile</button>' +
+      '<button type="button" data-reach="set">this set</button>' +
+      '<button type="button" data-reach="all">every set</button></div>' +
       '  <button type="button" class="tt-duplicate button" ' +
       'title="Copy all 9 tiles into a new set, right after this one">Duplicate this set</button>' +
       '</div>';
@@ -753,6 +858,12 @@
     });
 
     panel.querySelector('.tt-duplicate').addEventListener('click', duplicateSet);
+    panel.querySelector('.tt-reach').addEventListener('click', function (evt) {
+      var reach = evt.target.getAttribute && evt.target.getAttribute('data-reach');
+      if (reach) {
+        setSwapReach(reach);
+      }
+    });
 
     panel.querySelector('.tt-make-frames').addEventListener('click', function () {
       var pc = controller();
@@ -863,6 +974,11 @@
       '  background-size: 12px 12px; border: 1px solid #3d3d3d; }',
       '#tt-panel .tt-hint { color: #c9a53d; }',
       '#tt-panel .tt-make-frames { margin-top: 4px; font-size: 11px; }',
+      '#tt-panel .tt-reach { margin-top: 6px; font-size: 11px; line-height: 20px; }',
+      '#tt-panel .tt-reach-option { margin: 0 0 0 4px; padding: 0 5px; font: inherit; line-height: 16px;',
+      '  color: #b3b3b3; background: #333; border: 1px solid #4a4a4a; border-radius: 2px;',
+      '  cursor: pointer; white-space: nowrap; }',
+      '#tt-panel .tt-reach-on { color: #1d1d1d; background: #ffd93d; border-color: #ffd93d; }',
       '#tt-panel .tt-duplicate { display: block; margin: 6px auto 0; font-size: 11px;',
       '  white-space: nowrap; }',
       '.preview-tile { position: relative; }',
@@ -929,6 +1045,7 @@
       }
       trackFrameChange();
       renderSheet(false);
+      syncReachUi();
       maybePrefillExport();
     }, 700);
   }
@@ -949,6 +1066,7 @@
       patchSheetDecor();
       patchOffsetClamp();
       patchPaintAnywhere();
+      patchColorSwap();
       buildPanel();
       subscribeAll();
       syncUi();
