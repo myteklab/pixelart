@@ -1856,15 +1856,21 @@
       note.style.display = 'none';
       return;
     }
-    var sets = Math.floor((layout.cells.length - layout.extras) / 9);
-    var text = (layout.perRow === 1 ? '1 set' : layout.perRow + ' sets') + ' per row, ' +
-      sets + (sets === 1 ? ' set' : ' sets') + ' in all.';
-    if (layout.extras) {
-      text += ' The other ' + (layout.extras === 1 ? 'frame goes' : layout.extras + ' frames go') +
-        ' underneath in order, ' + layout.columns + ' across.';
+    // Frame numbers, not bank counts: "2 of 5" read as "you have 5 sets" to
+    // someone whose project has 2 sets and a pile of loose tiles.
+    var total = layout.cells.length;
+    var last = total - layout.extras;
+    var sets = last / 9;
+    var text = 'Frames 1-' + last + ' are ' + (sets === 1 ? '1 set' : sets + ' sets') +
+      (sets > 1 ? ', ' + layout.perRow + ' per row.' : '.');
+    if (layout.extras === 1) {
+      text += ' Frame ' + total + ' goes underneath.';
+    } else if (layout.extras) {
+      text += ' Frames ' + (last + 1) + '-' + total + ' go underneath in order, ' +
+        layout.columns + ' across.';
     }
     if (exportSetCountGuessed) {
-      text += ' The set count is a guess from the seam check: change it if it is wrong.';
+      text += ' The number of sets was read from your seams. Change it if it is wrong.';
     }
     note.textContent = text;
     note.style.display = '';
@@ -1910,7 +1916,7 @@
       self.onColumnsInput_();
     };
 
-    // "Transition sets: the first [N] of M". The stock tab is built once per
+    // "Keep as 3x3 sets [N]", counted from frame 1. The stock tab is built once per
     // open, so the field and the column limits are set up here each time.
     function buildSetCountField(ctrl) {
       var banks = wholeBanks();
@@ -1919,13 +1925,11 @@
       }
       var row = document.createElement('div');
       row.className = 'tt-export-sets';
-      row.innerHTML = '<span>Transition sets: the first</span>' +
-        '<input type="number" min="0" class="textfield tt-export-sets-input">' +
-        '<span class="tt-export-sets-of"></span>';
+      row.innerHTML = '<span>Keep as 3x3 sets</span>' +
+        '<input type="number" min="0" class="textfield tt-export-sets-input">';
       var field = row.querySelector('input');
       field.setAttribute('max', banks);
       field.value = exportSets();
-      row.querySelector('.tt-export-sets-of').textContent = 'of ' + banks;
       field.addEventListener('input', function () {
         var n = parseInt(field.value, 10);
         if (isNaN(n)) {
