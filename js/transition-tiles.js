@@ -1756,20 +1756,52 @@
   // ── Export: sets side by side ──────────────────────────────────
   // Stock export fills the sheet frame by frame, so at 6 columns set 1's
   // TL T TR L C R share a row and every set comes out scrambled. With the
-  // mode on, the columns field counts in whole sets: each set is drawn as its
-  // 3x3 block, blocks fill rows of the chosen width, and the frames after the
-  // last whole set follow in rows of that same width underneath.
+  // mode on, the first N banks are exported as sets: each is drawn as its 3x3
+  // block, blocks fill rows of the chosen width, and every frame after them
+  // follows in frame order, in rows of that same width.
+  //
+  // N is asked, not assumed. The mode calls every 9 frames a set, but a
+  // tileset often keeps loose tiles after its sets, and drawing those as 3x3
+  // blocks scrambled them (Stephen's RPG tileset, 10-06: 2 sets, then 29
+  // loose tiles read as 3 more sets). The field starts at the leading banks
+  // the seam check accepts as one set.
 
   var exportSetsPerRow = 1;
+  var exportSetCount = null;  // null until the student changes the field
+  var exportSetCountGuessed = false;
 
-  function exportSets() {
+  function wholeBanks() {
     var pc = controller();
     return isEnabled() && pc ? Math.floor(pc.getFrameCount() / 9) : 0;
   }
 
+  function guessSetCount() {
+    var banks = wholeBanks();
+    for (var n = 0; n < banks; n++) {
+      var result = checkSeams(n * 9);
+      if (result.empty.length || result.unrelated) {
+        return n;
+      }
+    }
+    return banks;
+  }
+
+  function exportSets() {
+    var banks = wholeBanks();
+    if (!banks) {
+      return 0;
+    }
+    if (exportSetCount === null) {
+      exportSetCount = guessSetCount();
+      exportSetCountGuessed = true;
+    }
+    return Math.min(exportSetCount, banks);
+  }
+
   // Sheet cell [col, row] for every frame, plus the sheet size in cells.
-  function setSheetLayout(frameCount, perRow) {
-    var sets = Math.floor(frameCount / 9);
+  // The first `sets` banks of 9 are sets; everything after is in frame order.
+  function setSheetLayout(frameCount, perRow, sets) {
+    sets = Math.max(0, Math.min(sets, Math.floor(frameCount / 9)));
     perRow = Math.max(1, Math.min(perRow, sets));
     var columns = perRow * 3;
     var setRows = Math.ceil(sets / perRow) * 3;
@@ -1796,7 +1828,7 @@
 
   function exportLayout() {
     var sets = exportSets();
-    return sets ? setSheetLayout(controller().getFrameCount(), exportSetsPerRow) : null;
+    return sets ? setSheetLayout(controller().getFrameCount(), exportSetsPerRow, sets) : null;
   }
 
   // What the columns field asks for, read as whole sets. The field is only
@@ -1828,8 +1860,11 @@
     var text = (layout.perRow === 1 ? '1 set' : layout.perRow + ' sets') + ' per row, ' +
       sets + (sets === 1 ? ' set' : ' sets') + ' in all.';
     if (layout.extras) {
-      text += ' The ' + (layout.extras === 1 ? 'frame' : layout.extras + ' frames') +
-        ' after the last whole set ' + (layout.extras === 1 ? 'goes' : 'go') + ' in rows underneath.';
+      text += ' The other ' + (layout.extras === 1 ? 'frame goes' : layout.extras + ' frames go') +
+        ' underneath in order, ' + layout.columns + ' across.';
+    }
+    if (exportSetCountGuessed) {
+      text += ' The set count is a guess from the seam check: change it if it is wrong.';
     }
     note.textContent = text;
     note.style.display = '';
@@ -1871,15 +1906,62 @@
           input.value = layout.columns;
         }
       });
-      // The stock tab is built once per open, so the field limits are set here.
+      buildSetCountField(self);
+      self.onColumnsInput_();
+    };
+
+    // "Transition sets: the first [N] of M". The stock tab is built once per
+    // open, so the field and the column limits are set up here each time.
+    function buildSetCountField(ctrl) {
+      var banks = wholeBanks();
+      if (!banks || !ctrl.layoutContainer || ctrl.layoutContainer.querySelector('.tt-export-sets')) {
+        return;
+      }
+      var row = document.createElement('div');
+      row.className = 'tt-export-sets';
+      row.innerHTML = '<span>Transition sets: the first</span>' +
+        '<input type="number" min="0" class="textfield tt-export-sets-input">' +
+        '<span class="tt-export-sets-of"></span>';
+      var field = row.querySelector('input');
+      field.setAttribute('max', banks);
+      field.value = exportSets();
+      row.querySelector('.tt-export-sets-of').textContent = 'of ' + banks;
+      field.addEventListener('input', function () {
+        var n = parseInt(field.value, 10);
+        if (isNaN(n)) {
+          return;
+        }
+        exportSetCount = Math.max(0, Math.min(banks, n));
+        exportSetCountGuessed = false;
+        if (exportSetCount) {
+          // Keep the width the student asked for, in whole sets.
+          exportSetsPerRow = Math.min(exportSetsPerRow, exportSetCount);
+          ctrl.columnsInput.value = exportSetsPerRow * 3;
+        }
+        columnLimits(ctrl);
+        ctrl.onColumnsInput_();
+      });
+      field.addEventListener('change', function () {
+        field.value = exportSets();
+      });
+      var title = ctrl.layoutContainer.querySelector('.highlight');
+      ctrl.layoutContainer.insertBefore(row, title ? title.nextSibling : ctrl.layoutContainer.firstChild);
+      columnLimits(ctrl);
+    }
+
+    function columnLimits(ctrl) {
+      var input = ctrl.columnsInput;
       var sets = exportSets();
       if (sets) {
         input.setAttribute('min', 3);
         input.setAttribute('step', 3);
         input.setAttribute('max', sets * 3);
+      } else {
+        input.setAttribute('min', 1);
+        input.removeAttribute('step');
+        input.setAttribute('max', ctrl.piskelController.getFrameCount());
       }
-      self.onColumnsInput_();
-    };
+    }
 
     var stockColumnsInput = proto.onColumnsInput_;
     proto.onColumnsInput_ = function () {
@@ -1980,6 +2062,8 @@
       '  background-size: 12px 12px; border: 1px solid #3d3d3d; }',
       '#tt-panel .tt-hint { color: #c9a53d; }',
       '.tt-export-note { margin-top: 6px; font-size: 11px; line-height: 1.4; color: #b3b3b3; }',
+      '.tt-export-sets { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; line-height: 20px; }',
+      '.tt-export-sets input { width: 46px; }',
       '#tt-panel .tt-reach { margin-top: 8px; }',
       '#tt-panel .tt-reach-says { display: block; margin-bottom: 3px; font-size: 10px;',
       '  letter-spacing: .06em; text-transform: uppercase; color: #8a8a8a; }',
