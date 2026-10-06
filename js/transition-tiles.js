@@ -1753,6 +1753,212 @@
     input.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
+  // ── Export: sets side by side ──────────────────────────────────
+  // Stock export fills the sheet frame by frame, so at 6 columns set 1's
+  // TL T TR L C R share a row and every set comes out scrambled. With the
+  // mode on, the columns field counts in whole sets: each set is drawn as its
+  // 3x3 block, blocks fill rows of the chosen width, and the frames after the
+  // last whole set follow in rows of that same width underneath.
+
+  var exportSetsPerRow = 1;
+
+  function exportSets() {
+    var pc = controller();
+    return isEnabled() && pc ? Math.floor(pc.getFrameCount() / 9) : 0;
+  }
+
+  // Sheet cell [col, row] for every frame, plus the sheet size in cells.
+  function setSheetLayout(frameCount, perRow) {
+    var sets = Math.floor(frameCount / 9);
+    perRow = Math.max(1, Math.min(perRow, sets));
+    var columns = perRow * 3;
+    var setRows = Math.ceil(sets / perRow) * 3;
+    var cells = [];
+    for (var i = 0; i < frameCount; i++) {
+      if (i < sets * 9) {
+        var set = Math.floor(i / 9);
+        var tile = i % 9;
+        cells.push([(set % perRow) * 3 + tile % 3, Math.floor(set / perRow) * 3 + Math.floor(tile / 3)]);
+      } else {
+        var extra = i - sets * 9;
+        cells.push([extra % columns, setRows + Math.floor(extra / columns)]);
+      }
+    }
+    var extras = frameCount - sets * 9;
+    return {
+      perRow: perRow,
+      columns: columns,
+      rows: setRows + Math.ceil(extras / columns),
+      extras: extras,
+      cells: cells
+    };
+  }
+
+  function exportLayout() {
+    var sets = exportSets();
+    return sets ? setSheetLayout(controller().getFrameCount(), exportSetsPerRow) : null;
+  }
+
+  // What the columns field asks for, read as whole sets. The field is only
+  // rewritten on change, so typing 12 one key at a time is not snapped to 3
+  // after the first key.
+  function readSetsPerRow(input, sets) {
+    var value = parseInt(input.value, 10);
+    if (isNaN(value)) {
+      return exportSetsPerRow;
+    }
+    return Math.max(1, Math.min(sets, Math.round(value / 3) || 1));
+  }
+
+  function exportNote(ctrl, layout) {
+    var note = ctrl.layoutContainer && ctrl.layoutContainer.querySelector('.tt-export-note');
+    if (!note && ctrl.layoutContainer) {
+      note = document.createElement('div');
+      note.className = 'tt-export-note';
+      ctrl.layoutContainer.appendChild(note);
+    }
+    if (!note) {
+      return;
+    }
+    if (!layout) {
+      note.style.display = 'none';
+      return;
+    }
+    var sets = Math.floor((layout.cells.length - layout.extras) / 9);
+    var text = (layout.perRow === 1 ? '1 set' : layout.perRow + ' sets') + ' per row, ' +
+      sets + (sets === 1 ? ' set' : ' sets') + ' in all.';
+    if (layout.extras) {
+      text += ' The ' + (layout.extras === 1 ? 'frame' : layout.extras + ' frames') +
+        ' after the last whole set ' + (layout.extras === 1 ? 'goes' : 'go') + ' in rows underneath.';
+    }
+    note.textContent = text;
+    note.style.display = '';
+  }
+
+  function patchSetExport() {
+    var Png = pskl.controller && pskl.controller.settings && pskl.controller.settings.exportimage &&
+      pskl.controller.settings.exportimage.PngExportController;
+    if (!Png || Png.prototype.ttSetExport) {
+      return;
+    }
+    var proto = Png.prototype;
+    proto.ttSetExport = true;
+
+    var stockBestFit = proto.getBestFit_;
+    proto.getBestFit_ = function () {
+      var sets = exportSets();
+      return sets ? Math.min(exportSetsPerRow, sets) * 3 : stockBestFit.call(this);
+    };
+
+    var stockColumns = proto.getColumns_;
+    proto.getColumns_ = function () {
+      var layout = exportLayout();
+      return layout ? layout.columns : stockColumns.call(this);
+    };
+
+    var stockInit = proto.initLayoutSection_;
+    proto.initLayoutSection_ = function () {
+      stockInit.call(this);
+      var input = this.columnsInput;
+      if (!input || input.ttSnap) {
+        return;
+      }
+      input.ttSnap = true;
+      var self = this;
+      input.addEventListener('change', function () {
+        var layout = exportLayout();
+        if (layout) {
+          input.value = layout.columns;
+        }
+      });
+      // The stock tab is built once per open, so the field limits are set here.
+      var sets = exportSets();
+      if (sets) {
+        input.setAttribute('min', 3);
+        input.setAttribute('step', 3);
+        input.setAttribute('max', sets * 3);
+      }
+      self.onColumnsInput_();
+    };
+
+    var stockColumnsInput = proto.onColumnsInput_;
+    proto.onColumnsInput_ = function () {
+      var sets = exportSets();
+      if (!sets) {
+        exportNote(this, null);
+        return stockColumnsInput.call(this);
+      }
+      if (this.columnsInput.value === '') {
+        return;
+      }
+      exportSetsPerRow = readSetsPerRow(this.columnsInput, sets);
+      var layout = exportLayout();
+      this.rowsInput.value = layout.rows;
+      this.updateDimensionLabel_();
+      exportNote(this, layout);
+    };
+
+    var stockSheet = proto.createPngSpritesheet_;
+    proto.createPngSpritesheet_ = function () {
+      var layout = exportLayout();
+      if (!layout) {
+        return stockSheet.call(this);
+      }
+      var pc = this.piskelController;
+      var w = pc.getWidth();
+      var h = pc.getHeight();
+      var renderer = new pskl.rendering.PiskelRenderer(pc);
+      var canvas = pskl.utils.CanvasUtils.createCanvas(layout.columns * w, layout.rows * h);
+      var ctx = canvas.getContext('2d');
+      renderer.frames.forEach(function (frame, i) {
+        ctx.drawImage(frame, layout.cells[i][0] * w, layout.cells[i][1] * h);
+      });
+      var zoom = this.exportController.getExportZoom();
+      if (zoom != 1) {
+        canvas = pskl.utils.ImageResizer.resize(canvas, canvas.width * zoom, canvas.height * zoom, false);
+      }
+      return canvas;
+    };
+
+    // The PixiJS JSON gives each frame's place on the sheet, so it has to
+    // follow the same layout or it would point at the wrong tiles.
+    var stockPixi = proto.onPixiDownloadClick_;
+    proto.onPixiDownloadClick_ = function () {
+      var layout = exportLayout();
+      if (!layout) {
+        return stockPixi.call(this);
+      }
+      var zip = new window.JSZip();
+      var canvas = this.createPngSpritesheet_();
+      var name = this.piskelController.getPiskel().getDescriptor().name;
+      zip.file(name + '.png', pskl.utils.CanvasUtils.getBase64FromCanvas(canvas) + '\n', { base64: true });
+
+      var width = canvas.width / layout.columns;
+      var height = canvas.height / layout.rows;
+      var frames = {};
+      layout.cells.forEach(function (cell, i) {
+        frames[name + i + '.png'] = {
+          'frame': { 'x': width * cell[0], 'y': height * cell[1], 'w': width, 'h': height },
+          'rotated': false,
+          'trimmed': false,
+          'spriteSourceSize': { 'x': 0, 'y': 0, 'w': width, 'h': height },
+          'sourceSize': { 'w': width, 'h': height }
+        };
+      });
+      zip.file(name + '.json', JSON.stringify({
+        'frames': frames,
+        'meta': {
+          'app': 'https://github.com/piskelapp/piskel/',
+          'version': '1.0',
+          'image': name + '.png',
+          'format': 'RGBA8888',
+          'size': { 'w': canvas.width, 'h': canvas.height }
+        }
+      }));
+      pskl.utils.FileUtils.downloadAsFile(zip.generate({ type: 'blob' }), name + '.zip');
+    };
+  }
+
   // ── Styles ─────────────────────────────────────────────────────
 
   function injectStyles() {
@@ -1773,6 +1979,7 @@
       '  background-image: conic-gradient(#3a3a3a 25%, #2c2c2c 0 50%, #3a3a3a 0 75%, #2c2c2c 0);',
       '  background-size: 12px 12px; border: 1px solid #3d3d3d; }',
       '#tt-panel .tt-hint { color: #c9a53d; }',
+      '.tt-export-note { margin-top: 6px; font-size: 11px; line-height: 1.4; color: #b3b3b3; }',
       '#tt-panel .tt-reach { margin-top: 8px; }',
       '#tt-panel .tt-reach-says { display: block; margin-bottom: 3px; font-size: 10px;',
       '  letter-spacing: .06em; text-transform: uppercase; color: #8a8a8a; }',
@@ -1934,6 +2141,7 @@
       patchPaintAnywhere();
       patchColorSwap();
       patchBucket();
+      patchSetExport();
       buildPanel();
       subscribeAll();
       syncUi();
