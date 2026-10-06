@@ -8,7 +8,7 @@
  *   frame 4  frame 5  frame 6   =>   L   C  R      (set 1; frames 10-18
  *   frame 7  frame 8  frame 9        BL  B  BR      are set 2, and so on)
  *
- * What it adds (no data model or export changes):
+ * What it adds (no data model changes):
  *  1. Edit in context: in tile mode, the full 3x3 sheet is rendered around
  *     the drawing area in its fixed arrangement, with the tile being edited
  *     live in its own slot, so every seam is visible while drawing. Pressing
@@ -19,8 +19,9 @@
  *     survives visually even though it is carried by frame order.
  *
  * The existing tileset workflow (each frame is a tile, spritesheet export
- * builds the tileset image) is untouched. With 9 frames and 3 columns the
- * stock export already produces the standard 3x3 transition sheet.
+ * builds the tileset image) is kept. The PNG export's Columns field becomes
+ * "Sets wide" while the mode is on: the first N sets side by side, then every
+ * other frame in order underneath. At 1 it is the plain 3-column sheet.
  *
  * Follows the perfect-pixel-import.js add-on pattern: poll for pskl, patch
  * prototypes, inject DOM. Nothing in the packaged Piskel bundle is edited.
@@ -39,7 +40,6 @@
   var ACCENT_ALT = '#00a35c';
   var LABELS = ['TL', 'T', 'TR', 'L', 'C', 'R', 'BL', 'B', 'BR'];
 
-  var exportPrefilled = false;
 
   function isEnabled() {
     try { return localStorage.getItem(STORAGE_KEY) === '1'; } catch (e) { return false; }
@@ -1737,109 +1737,53 @@
     });
   }
 
-  // ── Export convenience: prefill 3 columns once per session ─────
-
-  function maybePrefillExport() {
-    if (exportPrefilled || !isEnabled() || !hasFullSet()) {
-      return;
-    }
-    var input = document.getElementById('png-export-columns');
-    if (!input) {
-      return;
-    }
-    exportPrefilled = true;
-    input.value = 3;
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-    input.dispatchEvent(new Event('change', { bubbles: true }));
-  }
-
-  // ── Export: sets side by side ──────────────────────────────────
+  // ── Export: sets wide ──────────────────────────────────────────
   // Stock export fills the sheet frame by frame, so at 6 columns set 1's
   // TL T TR L C R share a row and every set comes out scrambled. With the
-  // mode on, the first N banks are exported as sets: each is drawn as its 3x3
-  // block, blocks fill rows of the chosen width, and every frame after them
-  // follows in frame order, in rows of that same width.
+  // mode on, the Columns field becomes "Sets wide": the first N sets sit side
+  // by side across the top as 3x3 blocks, and every frame after them follows
+  // in frame order, 3N tiles across. One number, nothing guessed.
   //
-  // N is asked, not assumed. The mode calls every 9 frames a set, but a
-  // tileset often keeps loose tiles after its sets, and drawing those as 3x3
-  // blocks scrambled them (Stephen's RPG tileset, 10-06: 2 sets, then 29
-  // loose tiles read as 3 more sets). The field starts at the leading banks
-  // the seam check accepts as one set.
+  // Only the top row is laid out as sets on purpose. A tileset usually keeps
+  // loose tiles after its sets, and the mode cannot tell a real set from 9
+  // loose tiles: treating every 9 frames as a set scrambled Stephen's RPG
+  // tileset (10-06), and guessing from the seams called 4 of its banks sets.
+  // At 1 set wide the sheet is cell for cell the old 3-column export.
 
-  var exportSetsPerRow = 1;
-  var exportSetCount = null;  // null until the student changes the field
-  var exportSetCountGuessed = false;
+  var exportSetsWide = 1;
 
   function wholeBanks() {
     var pc = controller();
     return isEnabled() && pc ? Math.floor(pc.getFrameCount() / 9) : 0;
   }
 
-  function guessSetCount() {
-    var banks = wholeBanks();
-    for (var n = 0; n < banks; n++) {
-      var result = checkSeams(n * 9);
-      if (result.empty.length || result.unrelated) {
-        return n;
-      }
-    }
-    return banks;
-  }
-
-  function exportSets() {
-    var banks = wholeBanks();
-    if (!banks) {
-      return 0;
-    }
-    if (exportSetCount === null) {
-      exportSetCount = guessSetCount();
-      exportSetCountGuessed = true;
-    }
-    return Math.min(exportSetCount, banks);
-  }
-
   // Sheet cell [col, row] for every frame, plus the sheet size in cells.
-  // The first `sets` banks of 9 are sets; everything after is in frame order.
-  function setSheetLayout(frameCount, perRow, sets) {
-    sets = Math.max(0, Math.min(sets, Math.floor(frameCount / 9)));
-    perRow = Math.max(1, Math.min(perRow, sets));
-    var columns = perRow * 3;
-    var setRows = Math.ceil(sets / perRow) * 3;
+  function setSheetLayout(frameCount, wide) {
+    wide = Math.max(1, Math.min(wide, Math.floor(frameCount / 9)));
+    var columns = wide * 3;
     var cells = [];
     for (var i = 0; i < frameCount; i++) {
-      if (i < sets * 9) {
-        var set = Math.floor(i / 9);
+      if (i < wide * 9) {
         var tile = i % 9;
-        cells.push([(set % perRow) * 3 + tile % 3, Math.floor(set / perRow) * 3 + Math.floor(tile / 3)]);
+        cells.push([Math.floor(i / 9) * 3 + tile % 3, Math.floor(tile / 3)]);
       } else {
-        var extra = i - sets * 9;
-        cells.push([extra % columns, setRows + Math.floor(extra / columns)]);
+        var rest = i - wide * 9;
+        cells.push([rest % columns, 3 + Math.floor(rest / columns)]);
       }
     }
-    var extras = frameCount - sets * 9;
+    var extras = frameCount - wide * 9;
     return {
-      perRow: perRow,
+      wide: wide,
       columns: columns,
-      rows: setRows + Math.ceil(extras / columns),
+      rows: 3 + Math.ceil(extras / columns),
       extras: extras,
       cells: cells
     };
   }
 
   function exportLayout() {
-    var sets = exportSets();
-    return sets ? setSheetLayout(controller().getFrameCount(), exportSetsPerRow, sets) : null;
-  }
-
-  // What the columns field asks for, read as whole sets. The field is only
-  // rewritten on change, so typing 12 one key at a time is not snapped to 3
-  // after the first key.
-  function readSetsPerRow(input, sets) {
-    var value = parseInt(input.value, 10);
-    if (isNaN(value)) {
-      return exportSetsPerRow;
-    }
-    return Math.max(1, Math.min(sets, Math.round(value / 3) || 1));
+    var banks = wholeBanks();
+    return banks ? setSheetLayout(controller().getFrameCount(), Math.min(exportSetsWide, banks)) : null;
   }
 
   function exportNote(ctrl, layout) {
@@ -1856,21 +1800,15 @@
       note.style.display = 'none';
       return;
     }
-    // Frame numbers, not bank counts: "2 of 5" read as "you have 5 sets" to
-    // someone whose project has 2 sets and a pile of loose tiles.
     var total = layout.cells.length;
-    var last = total - layout.extras;
-    var sets = last / 9;
-    var text = 'Frames 1-' + last + ' are ' + (sets === 1 ? '1 set' : sets + ' sets') +
-      (sets > 1 ? ', ' + layout.perRow + ' per row.' : '.');
+    var last = layout.wide * 9;
+    var text = layout.wide === 1 ? 'Frames 1-9 are the set at the top.' :
+      'Frames 1-' + last + ' are ' + layout.wide + ' sets side by side.';
     if (layout.extras === 1) {
       text += ' Frame ' + total + ' goes underneath.';
     } else if (layout.extras) {
       text += ' Frames ' + (last + 1) + '-' + total + ' go underneath in order, ' +
-        layout.columns + ' across.';
-    }
-    if (exportSetCountGuessed) {
-      text += ' The number of sets was read from your seams. Change it if it is wrong.';
+        layout.columns + ' tiles across.';
     }
     note.textContent = text;
     note.style.display = '';
@@ -1887,8 +1825,8 @@
 
     var stockBestFit = proto.getBestFit_;
     proto.getBestFit_ = function () {
-      var sets = exportSets();
-      return sets ? Math.min(exportSetsPerRow, sets) * 3 : stockBestFit.call(this);
+      var banks = wholeBanks();
+      return banks ? Math.min(exportSetsWide, banks) : stockBestFit.call(this);
     };
 
     var stockColumns = proto.getColumns_;
@@ -1897,87 +1835,39 @@
       return layout ? layout.columns : stockColumns.call(this);
     };
 
+    // The stock tab is rebuilt on every open, so the label and limits are set here.
     var stockInit = proto.initLayoutSection_;
     proto.initLayoutSection_ = function () {
-      stockInit.call(this);
-      var input = this.columnsInput;
-      if (!input || input.ttSnap) {
-        return;
-      }
-      input.ttSnap = true;
-      var self = this;
-      input.addEventListener('change', function () {
-        var layout = exportLayout();
-        if (layout) {
-          input.value = layout.columns;
-        }
-      });
-      buildSetCountField(self);
-      self.onColumnsInput_();
-    };
-
-    // "Keep as 3x3 sets [N]", counted from frame 1. The stock tab is built once per
-    // open, so the field and the column limits are set up here each time.
-    function buildSetCountField(ctrl) {
       var banks = wholeBanks();
-      if (!banks || !ctrl.layoutContainer || ctrl.layoutContainer.querySelector('.tt-export-sets')) {
-        return;
+      var input = this.columnsInput;
+      if (banks && input) {
+        var label = input.previousElementSibling;
+        if (label) {
+          label.textContent = 'Sets wide';
+        }
       }
-      var row = document.createElement('div');
-      row.className = 'tt-export-sets';
-      row.innerHTML = '<span>Keep as 3x3 sets</span>' +
-        '<input type="number" min="0" class="textfield tt-export-sets-input">';
-      var field = row.querySelector('input');
-      field.setAttribute('max', banks);
-      field.value = exportSets();
-      field.addEventListener('input', function () {
-        var n = parseInt(field.value, 10);
-        if (isNaN(n)) {
-          return;
-        }
-        exportSetCount = Math.max(0, Math.min(banks, n));
-        exportSetCountGuessed = false;
-        if (exportSetCount) {
-          // Keep the width the student asked for, in whole sets.
-          exportSetsPerRow = Math.min(exportSetsPerRow, exportSetCount);
-          ctrl.columnsInput.value = exportSetsPerRow * 3;
-        }
-        columnLimits(ctrl);
-        ctrl.onColumnsInput_();
-      });
-      field.addEventListener('change', function () {
-        field.value = exportSets();
-      });
-      var title = ctrl.layoutContainer.querySelector('.highlight');
-      ctrl.layoutContainer.insertBefore(row, title ? title.nextSibling : ctrl.layoutContainer.firstChild);
-      columnLimits(ctrl);
-    }
-
-    function columnLimits(ctrl) {
-      var input = ctrl.columnsInput;
-      var sets = exportSets();
-      if (sets) {
-        input.setAttribute('min', 3);
-        input.setAttribute('step', 3);
-        input.setAttribute('max', sets * 3);
-      } else {
+      stockInit.call(this);
+      if (banks && input) {
         input.setAttribute('min', 1);
-        input.removeAttribute('step');
-        input.setAttribute('max', ctrl.piskelController.getFrameCount());
+        input.setAttribute('max', banks);
       }
-    }
+    };
 
     var stockColumnsInput = proto.onColumnsInput_;
     proto.onColumnsInput_ = function () {
-      var sets = exportSets();
-      if (!sets) {
+      var banks = wholeBanks();
+      if (!banks) {
         exportNote(this, null);
         return stockColumnsInput.call(this);
       }
-      if (this.columnsInput.value === '') {
+      var value = parseInt(this.columnsInput.value, 10);
+      if (isNaN(value)) {
         return;
       }
-      exportSetsPerRow = readSetsPerRow(this.columnsInput, sets);
+      exportSetsWide = Math.max(1, Math.min(banks, value));
+      if (value !== exportSetsWide) {
+        this.columnsInput.value = exportSetsWide;
+      }
       var layout = exportLayout();
       this.rowsInput.value = layout.rows;
       this.updateDimensionLabel_();
@@ -2066,8 +1956,6 @@
       '  background-size: 12px 12px; border: 1px solid #3d3d3d; }',
       '#tt-panel .tt-hint { color: #c9a53d; }',
       '.tt-export-note { margin-top: 6px; font-size: 11px; line-height: 1.4; color: #b3b3b3; }',
-      '.tt-export-sets { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; line-height: 20px; }',
-      '.tt-export-sets input { width: 46px; }',
       '#tt-panel .tt-reach { margin-top: 8px; }',
       '#tt-panel .tt-reach-says { display: block; margin-bottom: 3px; font-size: 10px;',
       '  letter-spacing: .06em; text-transform: uppercase; color: #8a8a8a; }',
@@ -2207,7 +2095,6 @@
       trackFrameChange();
       renderSheet(false);
       syncReachUi();
-      maybePrefillExport();
     }, 700);
   }
 
