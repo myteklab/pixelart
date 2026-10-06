@@ -1814,6 +1814,62 @@
     note.style.display = '';
   }
 
+  // The sheet at 1x, laid out as it will be saved (zoom is applied after).
+  function renderSheet1x(ctrl, layout) {
+    var pc = ctrl.piskelController;
+    var renderer = new pskl.rendering.PiskelRenderer(pc);
+    if (!layout) {
+      return renderer.renderAsCanvas(ctrl.getColumns_());
+    }
+    var w = pc.getWidth();
+    var h = pc.getHeight();
+    var canvas = pskl.utils.CanvasUtils.createCanvas(layout.columns * w, layout.rows * h);
+    var ctx = canvas.getContext('2d');
+    renderer.frames.forEach(function (frame, i) {
+      ctx.drawImage(frame, layout.cells[i][0] * w, layout.cells[i][1] * h);
+    });
+    return canvas;
+  }
+
+  var PREVIEW_W = 250;
+  var PREVIEW_H = 190;
+
+  // A small copy of the sheet under the fields, redrawn on every change, with
+  // each set outlined so the sets and the loose tiles can be told apart.
+  function drawExportPreview(ctrl, layout) {
+    var box = ctrl.layoutContainer;
+    if (!box || ctrl.piskelController.getFrameCount() < 2) {
+      return;
+    }
+    var view = box.querySelector('.tt-export-preview');
+    if (!view) {
+      view = document.createElement('canvas');
+      view.className = 'tt-export-preview';
+      box.appendChild(view);
+    }
+    var sheet = renderSheet1x(ctrl, layout);
+    var scale = Math.min(PREVIEW_W / sheet.width, PREVIEW_H / sheet.height);
+    // Whole-number scales keep the pixels square; a sheet too big for that
+    // shrinks smoothly instead.
+    if (scale >= 1) {
+      scale = Math.floor(scale);
+    }
+    view.width = Math.max(1, Math.round(sheet.width * scale));
+    view.height = Math.max(1, Math.round(sheet.height * scale));
+    var ctx = view.getContext('2d');
+    ctx.imageSmoothingEnabled = scale < 1;
+    ctx.drawImage(sheet, 0, 0, view.width, view.height);
+    if (layout) {
+      var tw = ctrl.piskelController.getWidth() * scale;
+      var th = ctrl.piskelController.getHeight() * scale;
+      ctx.strokeStyle = ACCENT;
+      ctx.lineWidth = 1;
+      for (var k = 0; k < layout.wide; k++) {
+        ctx.strokeRect(k * 3 * tw + 0.5, 0.5, 3 * tw - 1, 3 * th - 1);
+      }
+    }
+  }
+
   function patchSetExport() {
     var Png = pskl.controller && pskl.controller.settings && pskl.controller.settings.exportimage &&
       pskl.controller.settings.exportimage.PngExportController;
@@ -1858,7 +1914,9 @@
       var banks = wholeBanks();
       if (!banks) {
         exportNote(this, null);
-        return stockColumnsInput.call(this);
+        stockColumnsInput.call(this);
+        drawExportPreview(this, null);
+        return;
       }
       var value = parseInt(this.columnsInput.value, 10);
       if (isNaN(value)) {
@@ -1872,6 +1930,7 @@
       this.rowsInput.value = layout.rows;
       this.updateDimensionLabel_();
       exportNote(this, layout);
+      drawExportPreview(this, layout);
     };
 
     var stockSheet = proto.createPngSpritesheet_;
@@ -1880,15 +1939,7 @@
       if (!layout) {
         return stockSheet.call(this);
       }
-      var pc = this.piskelController;
-      var w = pc.getWidth();
-      var h = pc.getHeight();
-      var renderer = new pskl.rendering.PiskelRenderer(pc);
-      var canvas = pskl.utils.CanvasUtils.createCanvas(layout.columns * w, layout.rows * h);
-      var ctx = canvas.getContext('2d');
-      renderer.frames.forEach(function (frame, i) {
-        ctx.drawImage(frame, layout.cells[i][0] * w, layout.cells[i][1] * h);
-      });
+      var canvas = renderSheet1x(this, layout);
       var zoom = this.exportController.getExportZoom();
       if (zoom != 1) {
         canvas = pskl.utils.ImageResizer.resize(canvas, canvas.width * zoom, canvas.height * zoom, false);
@@ -1956,6 +2007,9 @@
       '  background-size: 12px 12px; border: 1px solid #3d3d3d; }',
       '#tt-panel .tt-hint { color: #c9a53d; }',
       '.tt-export-note { margin-top: 6px; font-size: 11px; line-height: 1.4; color: #b3b3b3; }',
+      '.tt-export-preview { display: block; margin-top: 8px; max-width: 100%; image-rendering: pixelated;',
+      '  background-image: conic-gradient(#3a3a3a 25%, #2c2c2c 0 50%, #3a3a3a 0 75%, #2c2c2c 0);',
+      '  background-size: 12px 12px; border: 1px solid #3d3d3d; }',
       '#tt-panel .tt-reach { margin-top: 8px; }',
       '#tt-panel .tt-reach-says { display: block; margin-bottom: 3px; font-size: 10px;',
       '  letter-spacing: .06em; text-transform: uppercase; color: #8a8a8a; }',
