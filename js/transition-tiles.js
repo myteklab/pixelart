@@ -326,6 +326,19 @@
     return isEnabled() && !!pc && bankComplete(currentBase());
   }
 
+  // Where the live tile's corner sits on the sheet. dither-patterns.js
+  // anchors its patterns here so they run across seams.
+  window.PixelArtTransition = {
+    tileOrigin: function () {
+      if (!cameraActive()) {
+        return null;
+      }
+      var pc = controller();
+      var rel = pc.getCurrentFrameIndex() - currentBase();
+      return { x: (rel % 3) * pc.getWidth(), y: Math.floor(rel / 3) * pc.getHeight() };
+    }
+  };
+
   function patchOffsetClamp() {
     var FrameRenderer = pskl.rendering.frame.FrameRenderer;
     var original = FrameRenderer.prototype.setOffset;
