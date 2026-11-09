@@ -1146,8 +1146,64 @@
     };
   }
 
+  // Dithering changes color at every pixel, so the two pixels facing each
+  // other across a seam differ even when the pattern runs straight through.
+  // A seam pixel is fine when the patch around it (2 deep on each side, 3
+  // along) also turns up somewhere wholly inside one of the two tiles: the
+  // tiles already contain that exact arrangement, so the seam only repeats
+  // it. A flipped checker or a band drawn a pixel off makes a patch found
+  // nowhere else. Works on raw color classes, since dropSpecks would blur
+  // a fine pattern.
+  function patternRuns(strip, dir, a) {
+    var W = strip.W;
+    var H = strip.H;
+    var cls = strip.cls;
+    var seen = null;
+    var deep = 4;
+    var along = 3;
+    var key = function (x0, y0) {
+      var s = '';
+      for (var j = 0; j < along; j++) {
+        for (var i = 0; i < deep; i++) {
+          s += (dir === 'r' ? cls[(y0 + j) * W + x0 + i] : cls[(y0 + i) * W + x0 + j]) + ',';
+        }
+      }
+      return s;
+    };
+    var edge = dir === 'r' ? a.w : a.h;
+    var span = dir === 'r' ? H : W;
+    var depth = dir === 'r' ? W : H;
+    return function (k) {
+      if (edge < deep || span < along) {
+        return false;
+      }
+      if (!seen) {
+        seen = {};
+        for (var d = 0; d + deep <= depth; d++) {
+          // Patches that cross the seam do not count as evidence.
+          if (d < edge && d + deep > edge) {
+            continue;
+          }
+          for (var t = 0; t + along <= span; t++) {
+            seen[dir === 'r' ? key(d, t) : key(t, d)] = 1;
+          }
+        }
+      }
+      // Only a seam the colors alternate through. Solid shapes meet the
+      // seam with the same color behind them, and that is checked as before.
+      var at = dir === 'r' ? k * W + edge - 1 : (edge - 1) * W + k;
+      var step = dir === 'r' ? 1 : W;
+      if (cls[at] === cls[at - step] && cls[at + step] === cls[at + 2 * step]) {
+        return false;
+      }
+      var t0 = Math.min(Math.max(k - 1, 0), span - along);
+      return !!(dir === 'r' ? seen[key(edge - 2, t0)] : seen[key(t0, edge - 2)]);
+    };
+  }
+
   function checkSeam(a, b, dir, posA, posB, isTexture) {
     var strip = seamStrip(a, b, dir);
+    var runs = patternRuns(strip, dir, a);
     var cls = dropSpecks(strip);
     var W = strip.W;
     var n = dir === 'r' ? a.h : a.w;
@@ -1192,7 +1248,7 @@
           var bx = dir === 'r' ? 0 : k;
           var by = dir === 'r' ? k : 0;
           if (kind === 'break') {
-            if (isTexture(a, ax, ay) || isTexture(b, bx, by)) {
+            if (isTexture(a, ax, ay) || isTexture(b, bx, by) || runs(k)) {
               continue;
             }
             breaks++;
