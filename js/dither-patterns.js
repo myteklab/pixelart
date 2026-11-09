@@ -6,7 +6,9 @@
  * while the tool is selected: five mix levels, four kinds of line, two
  * grids, two stipples. Fill mode paints the pattern into a connected area of one color,
  * like the bucket. Ramp mode fills that area with a gradient along a drag,
- * stepping through the mix levels from the first color to the second.
+ * from the first color to the second, in one of four styles (ordered,
+ * scattered, lines, dashes), optionally through every palette color between
+ * the two.
  *
  * The levels come from one 4x4 ordered (Bayer) matrix, so each level holds
  * every pixel of the lighter ones below it. A ramp drawn 25 -> 50 -> 75 has
@@ -135,9 +137,78 @@
     return band >= 0 && BAYER[(y + (oy || 0)) & 3][(x + (ox || 0) + 1) & 3] < RAMP_LEVELS[band];
   }
 
+  // Ramp styles. Ordered is the banded ramp above, unchanged. The others
+  // fade smoothly: every pixel has a place in a turn-on order (a threshold
+  // from 0 to 1), and how far along the drag a pixel sits decides how much
+  // of that order has turned over. The first and last seventh of the drag
+  // stay solid, as they do in the ordered ramp, so the styles line up.
+  var RAMP_STYLES = [
+    { id: 'ordered', title: 'Ordered: the Mix steps, one pixel at a time' },
+    { id: 'scattered', title: 'Scattered dots, thick near the join and thin away from it' },
+    { id: 'lines', title: 'Lines across, thinning away from the join' },
+    { id: 'dashes', title: 'Dashes two pixels wide, laid like bricks' }
+  ];
+  var LINE_ORDER = [0, 2, 1, 3];
+
+  function threshold(style, x, y) {
+    if (style === 'scattered') {
+      return (STIPPLE[(y & 15) * 16 + (x & 15)] + 0.5) / 256;
+    }
+    if (style === 'lines') {
+      return (LINE_ORDER[y & 3] + 0.5) / 4;
+    }
+    if (style === 'dashes') {
+      return (BAYER[y & 3][((x >> 1) + 1) & 3] + 0.5) / 16;
+    }
+    return (BAYER[y & 3][(x + 1) & 3] + 0.5) / 16;
+  }
+
+  // How far along the drag pixel (x, y) sits, 0 to 1. -1 for no drag.
+  function rampT(ax, ay, bx, by, x, y) {
+    var dx = bx - ax;
+    var dy = by - ay;
+    var len2 = dx * dx + dy * dy;
+    if (!len2) {
+      return -1;
+    }
+    return Math.min(1, Math.max(0, ((x - ax) * dx + (y - ay) * dy) / len2));
+  }
+
+  // Whether a pixel keeps the start color at position t of a two-color fade.
+  function keepsStart(style, t, x, y) {
+    if (!style || style === 'ordered') {
+      var n = RAMP_LEVELS.length;
+      var band = Math.min(n - 1, Math.max(0, Math.floor(t * n)));
+      return BAYER[y & 3][(x + 1) & 3] < RAMP_LEVELS[band];
+    }
+    var u = (t * 7 - 1) / 5;
+    if (u <= 0) {
+      return true;
+    }
+    if (u >= 1) {
+      return false;
+    }
+    return threshold(style, x, y) >= u;
+  }
+
+  // Which of `count` colors (first = start of the drag) pixel (x, y) gets.
+  // Several colors split the drag into equal stretches, each a two-color
+  // fade into the next, so a sky ramp passes through every band.
+  function rampColor(style, ax, ay, bx, by, x, y, ox, oy, count) {
+    var t = rampT(ax, ay, bx, by, x, y);
+    if (t < 0) {
+      return -1;
+    }
+    var n = Math.max(2, count || 2);
+    var s = t * (n - 1);
+    var k = Math.min(n - 2, Math.floor(s));
+    return keepsStart(style, s - k, x + (ox || 0), y + (oy || 0)) ? k : k + 1;
+  }
+
   var api = {
     patterns: PATTERNS, byId: byId, usesPrimary: usesPrimary, DEFAULT_ID: DEFAULT_ID,
-    RAMP_LEVELS: RAMP_LEVELS, rampBand: rampBand, rampUsesPrimary: rampUsesPrimary
+    RAMP_LEVELS: RAMP_LEVELS, rampBand: rampBand, rampUsesPrimary: rampUsesPrimary,
+    RAMP_STYLES: RAMP_STYLES, rampColor: rampColor, keepsStart: keepsStart
   };
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = api;
@@ -154,8 +225,10 @@
   var ACCENT = '#00f900';
   var PATTERN_KEY = 'pixelart-dither-pattern';
   var MODE_KEY = 'pixelart-dither-mode';
+  var RAMP_STYLE_KEY = 'pixelart-dither-ramp-style';
+  var THROUGH_KEY = 'pixelart-dither-ramp-through';
 
-  var settings = { pattern: DEFAULT_ID, mode: 'paint' };
+  var settings = { pattern: DEFAULT_ID, mode: 'paint', rampStyle: 'ordered', through: false };
   var panel = null;
   // Fill and Ramp take their area once per real press. Transition mode
   // re-presses the tool when a drag crosses into the next tile, and that
@@ -170,6 +243,9 @@
       }
       var m = localStorage.getItem(MODE_KEY);
       settings.mode = m === 'fill' || m === 'ramp' ? m : 'paint';
+      var rs = localStorage.getItem(RAMP_STYLE_KEY);
+      settings.rampStyle = RAMP_STYLES.some(function (r) { return r.id === rs; }) ? rs : 'ordered';
+      settings.through = localStorage.getItem(THROUGH_KEY) === '1';
     } catch (e) {}
   }
 
@@ -177,6 +253,8 @@
     try {
       localStorage.setItem(PATTERN_KEY, settings.pattern);
       localStorage.setItem(MODE_KEY, settings.mode);
+      localStorage.setItem(RAMP_STYLE_KEY, settings.rampStyle);
+      localStorage.setItem(THROUGH_KEY, settings.through ? '1' : '0');
     } catch (e) {}
   }
 
@@ -198,6 +276,40 @@
 
   function swapped() {
     return pskl.app.mouseStateService.isRightButtonPressed();
+  }
+
+  function sameColor(c) {
+    try {
+      return window.tinycolor(c).toHex8String();
+    } catch (e) {
+      return String(c);
+    }
+  }
+
+  // The colors a ramp passes through, start first. With "through palette"
+  // on, every color of the selected palette from the primary to the
+  // secondary, in palette order (either way round), so a palette saved from
+  // the gradient maker becomes a whole sky in one drag. missing: one of the
+  // two is not in that palette, and the ramp falls back to just the two.
+  function rampColors() {
+    var colors = pskl.app.selectedColorsService;
+    var first = colors.getPrimaryColor();
+    var second = colors.getSecondaryColor();
+    if (!settings.through) {
+      return { colors: [first, second] };
+    }
+    var list = [];
+    try {
+      var pal = pskl.app.paletteService.getPaletteById(pskl.UserSettings.get(pskl.UserSettings.SELECTED_PALETTE));
+      list = pal && pal.getColors ? pal.getColors() : [];
+    } catch (e) {}
+    var keys = list.map(sameColor);
+    var i = keys.indexOf(sameColor(first));
+    var j = keys.indexOf(sameColor(second));
+    if (i === -1 || j === -1 || i === j) {
+      return { colors: [first, second], missing: true };
+    }
+    return { colors: i < j ? list.slice(i, j + 1) : list.slice(j, i + 1).reverse() };
   }
 
   function patchTool() {
@@ -237,10 +349,10 @@
     // the frame, which would erase the art under every spot the drag passed.
     function drawRamp(tool, col, row, overlay) {
       var r = tool.ramp;
-      var colors = pskl.app.selectedColorsService;
-      var first = colors.getPrimaryColor();
-      var second = colors.getSecondaryColor();
-      var swap = swapped();
+      var list = rampColors().colors.slice();
+      if (swapped()) {
+        list.reverse();
+      }
       overlay.clear();
       tool.pixels = [];
       if (col === r.from.col && row === r.from.row) {
@@ -248,8 +360,7 @@
       }
       for (var i = 0; i < r.area.length; i++) {
         var p = r.area[i];
-        var primary = rampUsesPrimary(r.from.col, r.from.row, col, row, p.col, p.row, r.o.x, r.o.y) !== swap;
-        var color = primary ? first : second;
+        var color = list[rampColor(settings.rampStyle, r.from.col, r.from.row, col, row, p.col, p.row, r.o.x, r.o.y, list.length)];
         overlay.setPixel(p.col, p.row, color);
         tool.pixels.push({ col: p.col, row: p.row, color: color });
       }
@@ -332,6 +443,19 @@
     }
   }
 
+  // A tiny ramp, top to bottom, in the same light-on-dark as the patterns.
+  function drawRampSwatch(canvas, style) {
+    var ctx = canvas.getContext('2d');
+    var cells = 12;
+    var size = canvas.width / cells;
+    for (var y = 0; y < cells; y++) {
+      for (var x = 0; x < cells; x++) {
+        ctx.fillStyle = keepsStart(style, (y + 0.5) / cells, x, y) ? '#e4e4e4' : '#1b1b1b';
+        ctx.fillRect(x * size, y * size, size, size);
+      }
+    }
+  }
+
   function buildPanel() {
     var host = document.getElementById('animated-preview-container');
     if (!host || document.getElementById('dth-panel')) {
@@ -370,6 +494,28 @@
     });
     panel.appendChild(grid);
 
+    // In Ramp mode the patterns give way to the ramp styles.
+    var styles = el('div', 'dth-swatches dth-ramp-styles');
+    RAMP_STYLES.forEach(function (r) {
+      var b = el('button', 'dth-swatch');
+      b.type = 'button';
+      b.title = r.title;
+      b.setAttribute('aria-label', r.title);
+      b.setAttribute('data-ramp-style', r.id);
+      var cv = el('canvas');
+      cv.width = cv.height = SWATCH_CELLS * SWATCH_SCALE;
+      drawRampSwatch(cv, r.id);
+      b.appendChild(cv);
+      styles.appendChild(b);
+    });
+    panel.appendChild(styles);
+    var through = el('button', 'dth-through', 'Through palette');
+    through.type = 'button';
+    through.setAttribute('data-through', '1');
+    through.title = 'Blend through every color of the selected palette between your first and second colors, ' +
+      'in palette order. Save the gradient maker\'s palette, pick it, then drag once for a whole sky.';
+    panel.appendChild(through);
+
     panel.appendChild(el('div', 'dth-note'));
 
     panel.addEventListener('click', function (evt) {
@@ -381,6 +527,10 @@
         settings.mode = b.getAttribute('data-mode');
       } else if (b.hasAttribute('data-pattern')) {
         settings.pattern = b.getAttribute('data-pattern');
+      } else if (b.hasAttribute('data-ramp-style')) {
+        settings.rampStyle = b.getAttribute('data-ramp-style');
+      } else if (b.hasAttribute('data-through')) {
+        settings.through = !settings.through;
       } else {
         return;
       }
@@ -406,11 +556,21 @@
       var id = b.getAttribute('data-pattern');
       b.classList.toggle('dth-on', id === settings.pattern);
     });
+    panel.querySelectorAll('button[data-ramp-style]').forEach(function (b) {
+      b.classList.toggle('dth-on', b.getAttribute('data-ramp-style') === settings.rampStyle);
+    });
+    panel.querySelector('.dth-through').classList.toggle('dth-on', settings.through);
     panel.classList.toggle('dth-ramp', settings.mode === 'ramp');
     var box = panel.querySelector('.dth-note');
     box.innerHTML = '';
     if (settings.mode === 'ramp') {
-      box.appendChild(el('div', '', 'Drag from the first color toward the second. Uses the Mix steps.'));
+      var rc = rampColors();
+      box.appendChild(el('div', '', 'Drag from the first color toward the second.'));
+      if (rc.missing) {
+        box.appendChild(el('div', 'dth-warn', 'Your two colors are not both in the palette, so just the two.'));
+      } else if (settings.through) {
+        box.appendChild(el('div', '', 'Through ' + rc.colors.length + ' palette colors.'));
+      }
     }
     if (isSeeThrough(pskl.app.selectedColorsService.getSecondaryColor())) {
       box.appendChild(el('div', 'dth-warn', 'Second color is see-through: gaps erase.'));
@@ -474,7 +634,14 @@
       '#dth-panel .dth-swatch canvas { display: block; width: 24px; height: 24px; image-rendering: pixelated; }',
       '#dth-panel .dth-note { margin-top: 5px; line-height: 1.3; color: #8a8a8a; }',
       '#dth-panel .dth-note .dth-warn { color: #c9a53d; }',
-      '#dth-panel.dth-ramp .dth-swatches { opacity: .3; pointer-events: none; }'
+      '#dth-panel .dth-ramp-styles, #dth-panel .dth-through { display: none; }',
+      '#dth-panel.dth-ramp .dth-swatches { display: none; }',
+      '#dth-panel.dth-ramp .dth-ramp-styles { display: grid; }',
+      '#dth-panel.dth-ramp .dth-through { display: block; width: 100%; height: 22px; margin-top: 5px; padding: 0;',
+      '  font-family: inherit; font-size: 11px; color: #bdbdbd; background: #2e2e2e;',
+      '  border: 1px solid #4a4a4a; border-radius: 3px; cursor: pointer; }',
+      '#dth-panel .dth-through:hover { color: #fff; background: #3a3a3a; }',
+      '#dth-panel.dth-ramp .dth-through.dth-on { color: #1d1d1d; background: ' + ACCENT + '; font-weight: bold; }'
     ].join('\n');
     document.head.appendChild(style);
   }
@@ -483,6 +650,12 @@
     $.subscribe(Events.TOOL_SELECTED, onToolSelected);
     $.subscribe(Events.PRIMARY_COLOR_SELECTED, syncPanel);
     $.subscribe(Events.SECONDARY_COLOR_SELECTED, syncPanel);
+    // Picking another palette changes what "through palette" passes through.
+    $.subscribe(Events.USER_SETTINGS_CHANGED, function () {
+      if (panel && settings.mode === 'ramp') {
+        syncPanel();
+      }
+    });
   }
 
   function waitForPiskel() {
