@@ -4,7 +4,7 @@
  * Stock Piskel dithers one way: a 50% checkerboard of the primary and
  * secondary colors. This adds a small swatch panel beside the tool column
  * while the tool is selected: five mix levels, four kinds of line, two
- * grids. Fill mode paints the pattern into a connected area of one color,
+ * grids, two stipples. Fill mode paints the pattern into a connected area of one color,
  * like the bucket. Ramp mode fills that area with a gradient along a drag,
  * stepping through the mix levels from the first color to the second.
  *
@@ -44,6 +44,39 @@
     };
   }
 
+  // Stipple: the order dots are added in, on a 16x16 tile that wraps. Each
+  // dot goes in the emptiest spot left, with a small random nudge so the
+  // dots do not settle into a grid (without it they formed one). Made once,
+  // offline, and kept only where it passed: no two dots touching at 12%, no
+  // row or column holding more than 2 dots at 6%, and the platform's
+  // "Check my tiling" calling a stippled grass tile good. Denser than 12%
+  // is left out on purpose: at 25% dots start touching band edges, and
+  // "Check my seams" reads those as breaks.
+  var STIPPLE = [
+     23,138,180, 77,164,237,  6,142, 72,183,102,  5, 41,157,106,225,
+    151,212, 35,108,131, 48,206,120,255, 50,221,146, 68,210, 46, 76,
+    121, 62,241,197, 22, 90,175, 98, 16,163, 86,117,244,181, 18,167,
+    191,  0, 73,156,136,249, 64,219,129,201, 28,192, 10,133, 96,254,
+    110,215, 93,227, 42,185,  9,150, 78, 58,220,104,160, 63,224, 38,
+     24,140,174, 19,123,103,228, 34,171,238,135, 44,231, 80,147,177,
+     91, 59,243, 49,211,158, 83,193,109,  3, 88,179, 21,195, 55,207,
+    119,155,190, 75,134, 14,253, 43,141,204,153,250,116,100,  4,246,
+     32,222,  7,113,226,176, 65,126,217, 69, 51, 30,162,223,132,166,
+     54,101,202,145, 36, 95,196, 20, 99,235,125,199, 74, 39,203, 82,
+    251,172, 70,236, 57,165,245,149, 33,169,  8,182,242,144, 11,186,
+     26,105, 15,124,187,  1, 79,115,209, 85,139,107, 53, 92,232,122,
+    143,208,161,218, 87,137,230, 47,178,247, 60,205, 17,114,168, 67,
+    239, 81, 31, 52,248, 27,200, 71, 12,154, 37,229,184,152,216, 45,
+    173,128,194,112,148, 94,159,111,214,130, 84,118, 66, 29, 89,  2,
+     97, 56,234, 13,213, 61,189, 40,233, 25,170,240,198,127,252,188
+  ];
+
+  function stipple(n) {
+    return function (x, y) {
+      return STIPPLE[(y & 15) * 16 + (x & 15)] < n;
+    };
+  }
+
   var PATTERNS = [
     { id: 'mix12', group: 'mix', title: 'A little of the first color', test: level(2) },
     { id: 'mix25', group: 'mix', title: 'One in four first color', test: level(4) },
@@ -55,7 +88,9 @@
     { id: 'rise', group: 'lines', title: 'Slanted lines, up to the right', test: function (x, y) { return ((x + y) & 3) < 2; } },
     { id: 'fall', group: 'lines', title: 'Slanted lines, down to the right', test: function (x, y) { return ((x - y) & 3) < 2; } },
     { id: 'grid', group: 'grid', title: 'Square grid', test: function (x, y) { return (x & 3) === 0 || (y & 3) === 0; } },
-    { id: 'hatch', group: 'grid', title: 'Diamond grid', test: function (x, y) { return ((x + y) & 3) === 0 || ((x - y) & 3) === 0; } }
+    { id: 'hatch', group: 'grid', title: 'Diamond grid', test: function (x, y) { return ((x + y) & 3) === 0 || ((x - y) & 3) === 0; } },
+    { id: 'dots6', group: 'stipple', title: 'A few scattered dots (repeats every 16 pixels)', test: stipple(16) },
+    { id: 'dots12', group: 'stipple', title: 'Scattered dots (repeats every 16 pixels)', test: stipple(32) }
   ];
 
   var DEFAULT_ID = 'mix50';
