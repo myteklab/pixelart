@@ -4,7 +4,7 @@
  * When enabled, frames are grouped into BANKS, and each complete bank is one
  * transition set (a project can hold several sets). The set shape is picked
  * in the panel: a 3x3 set (banks of 9, below), or a strip 1 tile wide and 2
- * to 8 tall (banks of that many) for a gradient that runs down through
+ * to 12 tall (banks of that many) for a gradient that runs down through
  * several tiles, like sky to ground or water getting deeper:
  *
  *   frame 1  frame 2  frame 3        TL  T  TR
@@ -42,7 +42,11 @@
   // Every other set in the frame list, so two neighbors still differ.
   var ACCENT_ALT = '#00a35c';
   var SHAPE_KEY = 'pixelart-transition-shape';
-  var SHAPE_NAMES = ['3x3', 'strip-2', 'strip-3', 'strip-4', 'strip-5', 'strip-6', 'strip-7', 'strip-8'];
+  // Up to 12: the IT2 sky is 5 bands and 4 joins, 9 tiles in one column.
+  var SHAPE_NAMES = ['3x3'];
+  for (var sn = 2; sn <= 12; sn++) {
+    SHAPE_NAMES.push('strip-' + sn);
+  }
 
   // Everything the mode needs to know about a set's layout. Tiles are
   // numbered across then down, so tile i sits at (i % cols, i / cols).
