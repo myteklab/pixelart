@@ -9,7 +9,7 @@
  * from the first color to the second, in one of seven styles (ordered,
  * scattered, lines, dashes, upright dashes, dotted lines, plus shapes),
  * optionally through every palette color between the two. With the sheet
- * view on, a ramp can cover the whole set in one drag. "Your own" is an
+ * view on, a ramp can cover every tile of the set in one drag. "Your own" is an
  * 8 x 8 pattern drawn in the panel, for Paint and Fill.
  *
  * The levels come from one 4x4 ordered (Bayer) matrix, so each level holds
@@ -392,11 +392,13 @@
     return settings.reach === 'set' && !!sheet();
   }
 
-  // A ramp over the whole set: the set's tiles on this layer are laid into
-  // one sheet so the area to fill is found across seams, as the bucket's
-  // "this set" does. The ramp is drawn straight into the tiles so every tile
-  // shows it while dragging, from a snapshot taken here, and each move puts
-  // the snapshot back first.
+  // A ramp over the whole set covers every pixel of every tile in it on this
+  // layer, whatever is there. It does not look for a connected area of one
+  // color the way the tile ramp does: a sky strip usually has each band tile
+  // filled with its own color already, and a connected area would stop at the
+  // tile that was pressed (Stephen: "only one tile filled"). The ramp is
+  // drawn straight into the tiles so every tile shows it while dragging, from
+  // a snapshot taken here, and each move puts the snapshot back first.
   function startSetRamp(col, row) {
     var t = sheet();
     var pc = pskl.app.piskelController;
@@ -406,7 +408,6 @@
     var w = pc.getWidth();
     var h = pc.getHeight();
     var layer = pc.getCurrentLayer();
-    var whole = new pskl.model.Frame(sh.cols * w, sh.rows * h);
     var frames = [];
     var snap = [];
     for (var i = 0; i < sh.size; i++) {
@@ -416,18 +417,17 @@
       }
       frames.push(f);
       snap.push(f.getPixels());
-      var ox = (i % sh.cols) * w;
-      var oy = Math.floor(i / sh.cols) * h;
-      f.forEachPixel(function (c, x, y) {
-        whole.setPixel(ox + x, oy + y, c);
-      });
     }
-    var from = { x: o.x + col, y: o.y + row };
+    var area = [];
+    for (var y = 0; y < sh.rows * h; y++) {
+      for (var x = 0; x < sh.cols * w; x++) {
+        area.push({ col: x, row: y });
+      }
+    }
     return {
-      base: base, cols: sh.cols, w: w, h: h, o: o, frames: frames, snap: snap, from: from,
-      layer: pc.getCurrentLayerIndex(),
-      area: pskl.PixelUtils.getSimilarConnectedPixelsFromFrame(whole, from.x, from.y),
-      changes: null
+      base: base, cols: sh.cols, w: w, h: h, o: o, frames: frames, snap: snap,
+      from: { x: o.x + col, y: o.y + row },
+      layer: pc.getCurrentLayerIndex(), area: area, changes: null
     };
   }
 
@@ -814,8 +814,8 @@
       b.type = 'button';
       b.setAttribute('data-reach', r[0]);
       b.title = r[0] === 'set' ?
-        'Whole set: one drag fills the area across every tile of the set, through the seams' :
-        'This tile: the ramp stays inside the tile you press in';
+        'Whole set: one drag covers every tile of the set, replacing what is there. Undo brings it back' :
+        'This tile: the ramp fills the area of one color you press in, inside that tile';
       reach.appendChild(b);
     });
     panel.appendChild(reach);
@@ -888,6 +888,9 @@
     if (settings.mode === 'ramp') {
       var rc = rampColors();
       box.appendChild(el('div', '', 'Drag from the first color toward the second.'));
+      if (setReach()) {
+        box.appendChild(el('div', 'dth-warn', 'Set: covers every tile, replacing what is there.'));
+      }
       if (rc.missing) {
         box.appendChild(el('div', 'dth-warn', 'Your two colors are not both in the palette, so just the two.'));
       } else if (settings.through) {
