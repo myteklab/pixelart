@@ -326,9 +326,21 @@
     return isEnabled() && !!pc && bankComplete(currentBase());
   }
 
-  // Where the live tile's corner sits on the sheet. dither-patterns.js
-  // anchors its patterns here so they run across seams.
+  // For the other add-ons. dither-patterns.js anchors its patterns to the
+  // live tile's place on the sheet; squint-view.js redraws the sheet.
   window.PixelArtTransition = {
+    active: function () {
+      return cameraActive();
+    },
+    base: function () {
+      return currentBase();
+    },
+    tileCanvas: function (index) {
+      return tileCanvas(index);
+    },
+    sheetHash: function () {
+      return setHash(currentBase());
+    },
     tileOrigin: function () {
       if (!cameraActive()) {
         return null;
