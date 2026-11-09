@@ -2230,6 +2230,19 @@
     var style = document.createElement('style');
     style.id = 'tt-styles';
     style.textContent = [
+      // The transition panel makes the right column taller than a laptop
+      // screen, and Piskel gives that column no scrolling, so the palettes
+      // below it could not be reached (Stephen, 11-09). Let it scroll. The
+      // platform's wheel guard lets the wheel through to a scrolling box.
+      '.right-column { overflow-y: auto; overflow-x: hidden; scrollbar-width: thin;',
+      '  scrollbar-color: #4a4a4a transparent; }',
+      '.right-column::-webkit-scrollbar { width: 6px; }',
+      '.right-column::-webkit-scrollbar-thumb { background: #4a4a4a; border-radius: 3px; }',
+      // Piskel pins the zoom readout to the column bottom with position
+      // absolute, which floats it over the panels once the column scrolls.
+      // In the flow at the end of the column it never covers anything.
+      '.right-column > .cursor-coordinates.pull-bottom { position: static; display: block;',
+      '  margin-top: 6px; text-align: left; }',
       '#tt-panel { margin: 6px 0 0 0; padding: 5px 8px 7px; background: #262626;',
       '  border: 1px solid #3d3d3d; border-radius: 3px; color: #b3b3b3; font-size: 12px; }',
       '#tt-panel .tt-title-row { display: flex; justify-content: space-between;',
