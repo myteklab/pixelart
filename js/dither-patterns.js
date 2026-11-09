@@ -8,7 +8,9 @@
  * like the bucket. Ramp mode fills that area with a gradient along a drag,
  * from the first color to the second, in one of seven styles (ordered,
  * scattered, lines, dashes, upright dashes, dotted lines, plus shapes),
- * optionally through every palette color between the two.
+ * optionally through every palette color between the two. With the sheet
+ * view on, a ramp can cover the whole set in one drag. "Your own" is an
+ * 8 x 8 pattern drawn in the panel, for Paint and Fill.
  *
  * The levels come from one 4x4 ordered (Bayer) matrix, so each level holds
  * every pixel of the lighter ones below it. A ramp drawn 25 -> 50 -> 75 has
@@ -92,10 +94,46 @@
     { id: 'grid', group: 'grid', title: 'Square grid', test: function (x, y) { return (x & 3) === 0 || (y & 3) === 0; } },
     { id: 'hatch', group: 'grid', title: 'Diamond grid', test: function (x, y) { return ((x + y) & 3) === 0 || ((x - y) & 3) === 0; } },
     { id: 'dots6', group: 'stipple', title: 'A few scattered dots (repeats every 16 pixels)', test: stipple(16) },
-    { id: 'dots12', group: 'stipple', title: 'Scattered dots (repeats every 16 pixels)', test: stipple(32) }
+    { id: 'dots12', group: 'stipple', title: 'Scattered dots (repeats every 16 pixels)', test: stipple(32) },
+    { id: 'custom', group: 'own', title: 'Your own pattern: draw it in the grid below', test: function (x, y) { return own[(y & 7) * 8 + (x & 7)] === 1; } }
   ];
 
   var DEFAULT_ID = 'mix50';
+
+  // Your own pattern: 8 x 8 cells, 1 = first color. 8 divides 16 and 32, so
+  // it wraps on the usual tile sizes. Starts as a checkerboard.
+  var OWN = 8;
+  var own = [];
+  for (var oi = 0; oi < OWN * OWN; oi++) {
+    own.push(((oi % OWN) + Math.floor(oi / OWN)) % 2);
+  }
+
+  // As a 64-character string of 0s and 1s, the way it is stored.
+  function ownPattern() {
+    return own.join('');
+  }
+
+  function setOwnPattern(bits) {
+    if (typeof bits !== 'string' || !/^[01]{64}$/.test(bits)) {
+      return false;
+    }
+    for (var i = 0; i < OWN * OWN; i++) {
+      own[i] = bits.charCodeAt(i) === 49 ? 1 : 0;
+    }
+    return true;
+  }
+
+  // An 8 x 8 copy of another pattern, the starting point for your own.
+  function ownFrom(id) {
+    var p = byId(id) || byId(DEFAULT_ID);
+    var bits = '';
+    for (var y = 0; y < OWN; y++) {
+      for (var x = 0; x < OWN; x++) {
+        bits += p.test(x, y) ? '1' : '0';
+      }
+    }
+    return bits;
+  }
 
   function byId(id) {
     for (var i = 0; i < PATTERNS.length; i++) {
@@ -252,7 +290,8 @@
   var api = {
     patterns: PATTERNS, byId: byId, usesPrimary: usesPrimary, DEFAULT_ID: DEFAULT_ID,
     RAMP_LEVELS: RAMP_LEVELS, rampBand: rampBand, rampUsesPrimary: rampUsesPrimary,
-    RAMP_STYLES: RAMP_STYLES, rampColor: rampColor, keepsStart: keepsStart
+    RAMP_STYLES: RAMP_STYLES, rampColor: rampColor, keepsStart: keepsStart,
+    ownPattern: ownPattern, setOwnPattern: setOwnPattern, ownFrom: ownFrom
   };
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = api;
@@ -271,8 +310,13 @@
   var MODE_KEY = 'pixelart-dither-mode';
   var RAMP_STYLE_KEY = 'pixelart-dither-ramp-style';
   var THROUGH_KEY = 'pixelart-dither-ramp-through';
+  var REACH_KEY = 'pixelart-dither-ramp-reach';
+  var OWN_KEY = 'pixelart-dither-own';
 
-  var settings = { pattern: DEFAULT_ID, mode: 'paint', rampStyle: 'ordered', through: false };
+  var settings = { pattern: DEFAULT_ID, mode: 'paint', rampStyle: 'ordered', through: false, reach: 'tile' };
+  // The pattern picked before "Your own", copied in the first time it opens.
+  var lastBuiltIn = DEFAULT_ID;
+  var ownSaved = false;
   var panel = null;
   // Fill and Ramp take their area once per real press. Transition mode
   // re-presses the tool when a drag crosses into the next tile, and that
@@ -284,12 +328,17 @@
       var p = localStorage.getItem(PATTERN_KEY);
       if (p && byId(p)) {
         settings.pattern = p;
+        if (p !== 'custom') {
+          lastBuiltIn = p;
+        }
       }
       var m = localStorage.getItem(MODE_KEY);
       settings.mode = m === 'fill' || m === 'ramp' ? m : 'paint';
       var rs = localStorage.getItem(RAMP_STYLE_KEY);
       settings.rampStyle = RAMP_STYLES.some(function (r) { return r.id === rs; }) ? rs : 'ordered';
       settings.through = localStorage.getItem(THROUGH_KEY) === '1';
+      settings.reach = localStorage.getItem(REACH_KEY) === 'set' ? 'set' : 'tile';
+      ownSaved = setOwnPattern(localStorage.getItem(OWN_KEY));
     } catch (e) {}
   }
 
@@ -299,6 +348,10 @@
       localStorage.setItem(MODE_KEY, settings.mode);
       localStorage.setItem(RAMP_STYLE_KEY, settings.rampStyle);
       localStorage.setItem(THROUGH_KEY, settings.through ? '1' : '0');
+      localStorage.setItem(REACH_KEY, settings.reach);
+      if (ownSaved) {
+        localStorage.setItem(OWN_KEY, ownPattern());
+      }
     } catch (e) {}
   }
 
@@ -320,6 +373,92 @@
 
   function swapped() {
     return pskl.app.mouseStateService.isRightButtonPressed();
+  }
+
+  // Live collaboration polls the current frame only, so say which other
+  // tiles a set ramp wrote into (transition mode does the same for strokes).
+  function touched(index) {
+    try {
+      window.dispatchEvent(new CustomEvent('pixelart:frame-touched', { detail: { frame: +index } }));
+    } catch (e) {}
+  }
+
+  function sheet() {
+    var t = window.PixelArtTransition;
+    return t && t.active && t.active() ? t : null;
+  }
+
+  function setReach() {
+    return settings.reach === 'set' && !!sheet();
+  }
+
+  // A ramp over the whole set: the set's tiles on this layer are laid into
+  // one sheet so the area to fill is found across seams, as the bucket's
+  // "this set" does. The ramp is drawn straight into the tiles so every tile
+  // shows it while dragging, from a snapshot taken here, and each move puts
+  // the snapshot back first.
+  function startSetRamp(col, row) {
+    var t = sheet();
+    var pc = pskl.app.piskelController;
+    var sh = t.shape();
+    var base = t.base();
+    var o = t.tileOrigin();
+    var w = pc.getWidth();
+    var h = pc.getHeight();
+    var layer = pc.getCurrentLayer();
+    var whole = new pskl.model.Frame(sh.cols * w, sh.rows * h);
+    var frames = [];
+    var snap = [];
+    for (var i = 0; i < sh.size; i++) {
+      var f = layer.getFrameAt(base + i);
+      if (!f) {
+        return null;
+      }
+      frames.push(f);
+      snap.push(f.getPixels());
+      var ox = (i % sh.cols) * w;
+      var oy = Math.floor(i / sh.cols) * h;
+      f.forEachPixel(function (c, x, y) {
+        whole.setPixel(ox + x, oy + y, c);
+      });
+    }
+    var from = { x: o.x + col, y: o.y + row };
+    return {
+      base: base, cols: sh.cols, w: w, h: h, o: o, frames: frames, snap: snap, from: from,
+      layer: pc.getCurrentLayerIndex(),
+      area: pskl.PixelUtils.getSimilarConnectedPixelsFromFrame(whole, from.x, from.y),
+      changes: null
+    };
+  }
+
+  function restoreSet(r) {
+    for (var i = 0; i < r.frames.length; i++) {
+      r.frames[i].setPixels(r.snap[i]);
+    }
+  }
+
+  function drawSetRamp(r, col, row) {
+    restoreSet(r);
+    r.changes = null;
+    var to = { x: r.o.x + col, y: r.o.y + row };
+    if (to.x === r.from.x && to.y === r.from.y) {
+      return;
+    }
+    var list = rampColors().colors.slice();
+    if (swapped()) {
+      list.reverse();
+    }
+    var changes = {};
+    for (var i = 0; i < r.area.length; i++) {
+      var p = r.area[i];
+      var k = Math.floor(p.row / r.h) * r.cols + Math.floor(p.col / r.w);
+      var x = p.col % r.w;
+      var y = p.row % r.h;
+      var color = list[rampColor(settings.rampStyle, r.from.x, r.from.y, to.x, to.y, p.col, p.row, 0, 0, list.length)];
+      r.frames[k].setPixel(x, y, color);
+      (changes[r.base + k] = changes[r.base + k] || []).push([x, y, color]);
+    }
+    r.changes = changes;
   }
 
   function sameColor(c) {
@@ -377,6 +516,12 @@
         return;
       }
       fillArmed = false;
+      if (settings.mode === 'ramp' && setReach()) {
+        this.rampSet = startSetRamp(col, row);
+        if (this.rampSet) {
+          return;
+        }
+      }
       var pixels = pskl.PixelUtils.getSimilarConnectedPixelsFromFrame(frame, col, row);
       if (settings.mode === 'ramp') {
         this.ramp = { from: { col: col, row: row }, area: pixels, o: origin() };
@@ -416,7 +561,9 @@
       }
       this.previousCol = col;
       this.previousRow = row;
-      if (settings.mode === 'ramp' && this.ramp) {
+      if (settings.mode === 'ramp' && this.rampSet) {
+        drawSetRamp(this.rampSet, col, row);
+      } else if (settings.mode === 'ramp' && this.ramp) {
         drawRamp(this, col, row, overlay);
       }
     };
@@ -426,6 +573,16 @@
     // empty undo step.
     proto.releaseToolAt = function (col, row, frame, overlay, event) {
       this.ramp = null;
+      if (this.rampSet) {
+        var done = this.rampSet;
+        this.rampSet = null;
+        if (done.changes) {
+          this.raiseSaveStateEvent({ setRamp: done.changes, layer: done.layer });
+          Object.keys(done.changes).forEach(touched);
+        }
+        overlay.clear();
+        return;
+      }
       if (settings.mode !== 'paint' && !this.pixels.length) {
         overlay.clear();
         return;
@@ -433,8 +590,28 @@
       return penRelease.call(this, col, row, frame, overlay, event);
     };
 
+    // A ramp across the set is one undo step that writes into several tiles.
+    // Everything else replays the stock way, from its pixel list.
+    var penReplay = proto.replay;
+    proto.replay = function (frame, data) {
+      if (data && data.setRamp) {
+        var layer = pskl.app.piskelController.getLayerAt(data.layer);
+        Object.keys(data.setRamp).forEach(function (index) {
+          var target = layer && layer.getFrameAt(+index);
+          if (target) {
+            data.setRamp[index].forEach(function (p) {
+              target.setPixel(p[0], p[1], p[2]);
+            });
+          }
+        });
+        return;
+      }
+      return penReplay.call(this, frame, data);
+    };
+
     // Transition mode carries pen strokes from tile to tile. A fill or a
-    // ramp belongs to the tile it was pressed in.
+    // ramp belongs to the tile it was pressed in, unless the ramp's reach is
+    // the whole set.
     proto.staysOnTile = function () {
       return settings.mode !== 'paint';
     };
@@ -484,6 +661,29 @@
         ctx.fillStyle = usesPrimary(id, x, y) ? '#e4e4e4' : '#1b1b1b';
         ctx.fillRect(x * SWATCH_SCALE, y * SWATCH_SCALE, SWATCH_SCALE, SWATCH_SCALE);
       }
+    }
+  }
+
+  var OWN_CELL = 12;
+
+  // The editor grid and the "Your own" swatch, both from the same cells.
+  function drawOwn() {
+    if (!panel) {
+      return;
+    }
+    var cv = panel.querySelector('.dth-own-grid');
+    var ctx = cv.getContext('2d');
+    for (var i = 0; i < OWN * OWN; i++) {
+      var x = (i % OWN) * OWN_CELL;
+      var y = Math.floor(i / OWN) * OWN_CELL;
+      ctx.fillStyle = own[i] ? '#e4e4e4' : '#1b1b1b';
+      ctx.fillRect(x, y, OWN_CELL, OWN_CELL);
+      ctx.strokeStyle = '#3a3a3a';
+      ctx.strokeRect(x + 0.5, y + 0.5, OWN_CELL - 1, OWN_CELL - 1);
+    }
+    var sw = panel.querySelector('[data-pattern="custom"] canvas');
+    if (sw) {
+      drawSwatch(sw, 'custom');
     }
   }
 
@@ -538,6 +738,53 @@
     });
     panel.appendChild(grid);
 
+    // Your own pattern: click or drag across the cells.
+    var ownBox = el('div', 'dth-own');
+    var ownCanvas = el('canvas', 'dth-own-grid');
+    ownCanvas.width = ownCanvas.height = OWN * OWN_CELL;
+    ownCanvas.title = 'Click or drag to draw your pattern: light is your first color, dark your second';
+    ownBox.appendChild(ownCanvas);
+    ownBox.appendChild(el('div', 'dth-own-says', 'Light cells take your first color.'));
+    panel.appendChild(ownBox);
+    var painting = null;
+    var cellAt = function (evt) {
+      var b = ownCanvas.getBoundingClientRect();
+      var x = Math.floor((evt.clientX - b.left) / (b.width / OWN));
+      var y = Math.floor((evt.clientY - b.top) / (b.height / OWN));
+      return x >= 0 && y >= 0 && x < OWN && y < OWN ? y * OWN + x : -1;
+    };
+    var paintCell = function (i) {
+      if (i < 0 || own[i] === painting) {
+        return;
+      }
+      own[i] = painting;
+      ownSaved = true;
+      drawOwn();
+    };
+    ownCanvas.addEventListener('pointerdown', function (evt) {
+      var i = cellAt(evt);
+      if (i < 0) {
+        return;
+      }
+      painting = own[i] ? 0 : 1;
+      ownCanvas.setPointerCapture(evt.pointerId);
+      paintCell(i);
+      evt.preventDefault();
+    });
+    ownCanvas.addEventListener('pointermove', function (evt) {
+      if (painting !== null) {
+        paintCell(cellAt(evt));
+      }
+    });
+    var stopPainting = function () {
+      if (painting !== null) {
+        painting = null;
+        saveSettings();
+      }
+    };
+    ownCanvas.addEventListener('pointerup', stopPainting);
+    ownCanvas.addEventListener('pointercancel', stopPainting);
+
     // In Ramp mode the patterns give way to the ramp styles.
     var styles = el('div', 'dth-swatches dth-ramp-styles');
     RAMP_STYLES.forEach(function (r) {
@@ -560,6 +807,19 @@
       'in palette order. Save the gradient maker\'s palette, pick it, then drag once for a whole sky.';
     panel.appendChild(through);
 
+    // Only while the sheet view is on: the ramp can cover the whole set.
+    var reach = el('div', 'dth-seg dth-reach');
+    [['tile', 'Tile'], ['set', 'Set']].forEach(function (r) {
+      var b = el('button', '', r[1]);
+      b.type = 'button';
+      b.setAttribute('data-reach', r[0]);
+      b.title = r[0] === 'set' ?
+        'Whole set: one drag fills the area across every tile of the set, through the seams' :
+        'This tile: the ramp stays inside the tile you press in';
+      reach.appendChild(b);
+    });
+    panel.appendChild(reach);
+
     panel.appendChild(el('div', 'dth-note'));
 
     panel.addEventListener('click', function (evt) {
@@ -570,7 +830,18 @@
       if (b.hasAttribute('data-mode')) {
         settings.mode = b.getAttribute('data-mode');
       } else if (b.hasAttribute('data-pattern')) {
-        settings.pattern = b.getAttribute('data-pattern');
+        var id = b.getAttribute('data-pattern');
+        if (id === 'custom' && !ownSaved) {
+          // Start from the pattern that was picked, so there is something to change.
+          setOwnPattern(ownFrom(settings.pattern === 'custom' ? lastBuiltIn : settings.pattern));
+          ownSaved = true;
+        }
+        if (id !== 'custom') {
+          lastBuiltIn = id;
+        }
+        settings.pattern = id;
+      } else if (b.hasAttribute('data-reach')) {
+        settings.reach = b.getAttribute('data-reach');
       } else if (b.hasAttribute('data-ramp-style')) {
         settings.rampStyle = b.getAttribute('data-ramp-style');
       } else if (b.hasAttribute('data-through')) {
@@ -604,6 +875,13 @@
       b.classList.toggle('dth-on', b.getAttribute('data-ramp-style') === settings.rampStyle);
     });
     panel.querySelector('.dth-through').classList.toggle('dth-on', settings.through);
+    panel.querySelectorAll('button[data-reach]').forEach(function (b) {
+      b.classList.toggle('dth-on', b.getAttribute('data-reach') === settings.reach);
+    });
+    var showReach = settings.mode === 'ramp' && !!sheet();
+    panel.querySelector('.dth-reach').style.display = showReach ? 'flex' : 'none';
+    panel.classList.toggle('dth-owning', settings.pattern === 'custom' && settings.mode !== 'ramp');
+    drawOwn();
     panel.classList.toggle('dth-ramp', settings.mode === 'ramp');
     var box = panel.querySelector('.dth-note');
     box.innerHTML = '';
@@ -678,7 +956,12 @@
       '#dth-panel .dth-swatch canvas { display: block; width: 24px; height: 24px; image-rendering: pixelated; }',
       '#dth-panel .dth-note { margin-top: 5px; line-height: 1.3; color: #8a8a8a; }',
       '#dth-panel .dth-note .dth-warn { color: #c9a53d; }',
-      '#dth-panel .dth-ramp-styles, #dth-panel .dth-through { display: none; }',
+      '#dth-panel .dth-ramp-styles, #dth-panel .dth-through, #dth-panel .dth-own { display: none; }',
+      '#dth-panel.dth-owning .dth-own { display: block; margin-top: 5px; }',
+      '#dth-panel .dth-own-grid { display: block; width: 96px; height: 96px; margin: 0 auto; cursor: pointer;',
+      '  image-rendering: pixelated; border: 1px solid #4a4a4a; touch-action: none; }',
+      '#dth-panel .dth-own-says { margin-top: 3px; font-size: 10px; color: #8a8a8a; text-align: center; }',
+      '#dth-panel .dth-reach { margin-top: 5px; margin-bottom: 0; }',
       '#dth-panel.dth-ramp .dth-swatches { display: none; }',
       '#dth-panel.dth-ramp .dth-ramp-styles { display: grid; }',
       '#dth-panel.dth-ramp .dth-through { display: block; width: 100%; height: 22px; margin-top: 5px; padding: 0;',
@@ -694,6 +977,12 @@
     $.subscribe(Events.TOOL_SELECTED, onToolSelected);
     $.subscribe(Events.PRIMARY_COLOR_SELECTED, syncPanel);
     $.subscribe(Events.SECONDARY_COLOR_SELECTED, syncPanel);
+    // A set becoming whole (or not) shows or hides the reach choice.
+    $.subscribe(Events.PISKEL_RESET, function () {
+      if (panel && panel.style.display !== 'none') {
+        syncPanel();
+      }
+    });
     // Picking another palette changes what "through palette" passes through.
     $.subscribe(Events.USER_SETTINGS_CHANGED, function () {
       if (panel && settings.mode === 'ramp') {
