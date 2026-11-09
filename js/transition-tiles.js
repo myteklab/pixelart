@@ -1,8 +1,11 @@
 /**
- * transition-tiles.js - Transition tileset (3x3) support for the frames-as-tiles workflow.
+ * transition-tiles.js - Transition tileset support for the frames-as-tiles workflow.
  *
- * When enabled, frames are grouped into BANKS of 9, and each complete bank
- * is a 3x3 transition set (a project can hold several sets):
+ * When enabled, frames are grouped into BANKS, and each complete bank is one
+ * transition set (a project can hold several sets). The set shape is picked
+ * in the panel: a 3x3 set (banks of 9, below), or a strip 1 tile wide and 2
+ * to 8 tall (banks of that many) for a gradient that runs down through
+ * several tiles, like sky to ground or water getting deeper:
  *
  *   frame 1  frame 2  frame 3        TL  T  TR
  *   frame 4  frame 5  frame 6   =>   L   C  R      (set 1; frames 10-18
@@ -38,11 +41,96 @@
   var ACCENT = '#00f900';
   // Every other set in the frame list, so two neighbors still differ.
   var ACCENT_ALT = '#00a35c';
-  var LABELS = ['TL', 'T', 'TR', 'L', 'C', 'R', 'BL', 'B', 'BR'];
+  var SHAPE_KEY = 'pixelart-transition-shape';
+  var SHAPE_NAMES = ['3x3', 'strip-2', 'strip-3', 'strip-4', 'strip-5', 'strip-6', 'strip-7', 'strip-8'];
+
+  // Everything the mode needs to know about a set's layout. Tiles are
+  // numbered across then down, so tile i sits at (i % cols, i / cols).
+  function makeShape(name) {
+    if (name.indexOf('strip-') === 0) {
+      var len = +name.slice(6);
+      var labels = ['Top'];
+      var seams = [];
+      var partners = [];
+      var i;
+      for (i = 1; i < len - 1; i++) {
+        labels.push('M' + i);
+      }
+      labels.push('Bot');
+      for (i = 0; i < len - 1; i++) {
+        seams.push([i, 'b', i + 1]);
+      }
+      // A strip is laid side by side across a map, so every tile meets a
+      // copy of itself on both sides. That is the main use, not a rare one.
+      for (i = 0; i < len; i++) {
+        seams.push([i, 'r', i]);
+      }
+      for (i = 0; i < Math.floor(len / 2); i++) {
+        partners.push([i, len - 1 - i]);
+      }
+      return {
+        name: name, cols: 1, rows: len, size: len, labels: labels, seams: seams,
+        partners: partners, inner: len - 1, sideRepeats: true
+      };
+    }
+    // [tile A, direction to B, tile B]. The first twelve are the seams
+    // inside the sheet. The rest are tiles that repeat against themselves on
+    // a real map: edges run along their own direction, the center both ways.
+    return {
+      name: '3x3', cols: 3, rows: 3, size: 9,
+      labels: ['TL', 'T', 'TR', 'L', 'C', 'R', 'BL', 'B', 'BR'],
+      seams: [
+        [0, 'r', 1], [1, 'r', 2], [3, 'r', 4], [4, 'r', 5], [6, 'r', 7], [7, 'r', 8],
+        [0, 'b', 3], [3, 'b', 6], [1, 'b', 4], [4, 'b', 7], [2, 'b', 5], [5, 'b', 8],
+        [1, 'r', 1], [7, 'r', 7], [3, 'b', 3], [5, 'b', 5], [4, 'r', 4], [4, 'b', 4]
+      ],
+      partners: [[0, 2, 6, 8], [1, 7], [3, 5]],
+      inner: 12, sideRepeats: false
+    };
+  }
+
+  function storedShape() {
+    var v = null;
+    try { v = localStorage.getItem(SHAPE_KEY); } catch (e) {}
+    return SHAPE_NAMES.indexOf(v) === -1 ? '3x3' : v;
+  }
+
+  var SHAPE = makeShape(storedShape());
 
 
   function isEnabled() {
     try { return localStorage.getItem(STORAGE_KEY) === '1'; } catch (e) { return false; }
+  }
+
+  // A new shape regroups the frames: the same 12 frames are one 3x3 set
+  // plus three loose tiles, or three 4-tall strips. Nothing in the project
+  // changes, only how the mode reads it.
+  function setShape(name) {
+    if (SHAPE_NAMES.indexOf(name) === -1 || name === SHAPE.name) {
+      return;
+    }
+    try { localStorage.setItem(SHAPE_KEY, name); } catch (e) {}
+    SHAPE = makeShape(name);
+    cache = {};
+    seamPick = '';
+    lastPos = null;
+    wasActive = false;
+    lastRenderHash = '';
+    var pick = panel && panel.querySelector('.tt-shape');
+    if (pick && pick.value !== name) {
+      pick.value = name;
+    }
+    dropOutline();
+    $.publish(Events.PISKEL_RESET);
+    trackFrameChange();
+    if (!cameraActive()) {
+      try { pskl.app.drawingController.setOffset(0, 0); } catch (e) {}
+    }
+    renderSheet(true);
+    syncActions();
+    syncReachUi();
+    refreshSeams();
+    badgeFrameList();
   }
 
   function setEnabled(on) {
@@ -90,16 +178,16 @@
     }
   }
 
-  // Banks: frames [9k, 9k+8] form transition set k. A frame participates
-  // only when its whole bank exists; a trailing partial bank keeps stock
-  // behavior until it is filled out.
+  // Banks: frames [nk, nk+n-1] form transition set k, n being the set's
+  // tile count. A frame participates only when its whole bank exists; a
+  // trailing partial bank keeps stock behavior until it is filled out.
   function bankBase(frameIndex) {
-    return Math.floor(frameIndex / 9) * 9;
+    return Math.floor(frameIndex / SHAPE.size) * SHAPE.size;
   }
 
   function bankComplete(base) {
     var pc = controller();
-    return !!pc && pc.getFrameCount() >= base + 9;
+    return !!pc && pc.getFrameCount() >= base + SHAPE.size;
   }
 
   function currentBase() {
@@ -146,8 +234,8 @@
     var pc = controller();
     // Current frame index is part of the hash: the sheet-map highlight
     // depends on it, so switching tiles must trigger a redraw.
-    var h = String(base) + '|' + (pc ? pc.getCurrentFrameIndex() : -1) + '|';
-    for (var i = base; i < base + 9; i++) {
+    var h = SHAPE.name + '|' + base + '|' + (pc ? pc.getCurrentFrameIndex() : -1) + '|';
+    for (var i = base; i < base + SHAPE.size; i++) {
       h += frameHash(i);
     }
     return h;
@@ -160,9 +248,11 @@
   // is on an edge, and with no wash on the tiles the backdrop is the only
   // thing that shows where the sheet ends.
   function clearSheet(context, rel, tw, th) {
+    var far = Math.max(SHAPE.cols, SHAPE.rows) + 1;
     context.fillStyle = Constants.ZOOMED_OUT_BACKGROUND_COLOR;
-    context.fillRect(-4 * tw, -4 * th, 9 * tw, 9 * th);
-    context.clearRect(-(rel % 3) * tw, -Math.floor(rel / 3) * th, 3 * tw, 3 * th);
+    context.fillRect(-far * tw, -far * th, (2 * far + 1) * tw, (2 * far + 1) * th);
+    context.clearRect(-(rel % SHAPE.cols) * tw, -Math.floor(rel / SHAPE.cols) * th,
+      SHAPE.cols * tw, SHAPE.rows * th);
   }
 
   function patchTiledFrames() {
@@ -199,21 +289,21 @@
         return;
       }
 
-      // Draw the WHOLE 3x3 sheet in its fixed arrangement, with the tile
+      // Draw the WHOLE sheet in its fixed arrangement, with the tile
       // being edited live in its own slot. The layout never changes and no
       // tile is ever missing; only which cell is editable moves. Offsets can
       // reach two tiles out (editing a corner), so clear that whole region
       // first: the stock clear only covers one tile around the canvas.
-      var col = (cur - base) % 3;
-      var row = Math.floor((cur - base) / 3);
+      var col = (cur - base) % SHAPE.cols;
+      var row = Math.floor((cur - base) / SHAPE.cols);
       clearSheet(context, cur - base, w * z, h * z);
 
-      for (var i = 0; i < 9; i++) {
+      for (var i = 0; i < SHAPE.size; i++) {
         if (base + i === cur) {
           continue; // the live canvas draws itself
         }
-        var dx = (i % 3) - col;
-        var dy = Math.floor(i / 3) - row;
+        var dx = (i % SHAPE.cols) - col;
+        var dy = Math.floor(i / SHAPE.cols) - row;
         var neighbor = tileCanvas(base + i);
         if (!neighbor) {
           continue;
@@ -247,8 +337,8 @@
       }
       var pc = controller();
       var rel = pc.getCurrentFrameIndex() - currentBase();
-      var col = rel % 3;
-      var row = Math.floor(rel / 3);
+      var col = rel % SHAPE.cols;
+      var row = Math.floor(rel / SHAPE.cols);
       var z = this.zoom;
       var tw = frame.getWidth() * z;
       var th = frame.getHeight() * z;
@@ -270,8 +360,8 @@
           ctx.fillStyle = color;
           line = ctx.fillRect.bind(ctx);
         }
-        for (var c = 0; c < 3; c++) {
-          for (var r = 0; r < 3; r++) {
+        for (var c = 0; c < SHAPE.cols; c++) {
+          for (var r = 0; r < SHAPE.rows; r++) {
             if (c === col && r === row) {
               continue; // piskel already drew this one
             }
@@ -289,9 +379,12 @@
         }
         // The seams are grid lines too. Stock piskel never needs them
         // because a lone frame has nothing on the other side of its edge.
-        for (var k = 1; k < 3; k++) {
-          line(k * tw - gridWidth / 2, 0, gridWidth, 3 * th);
-          line(0, k * th - gridWidth / 2, 3 * tw, gridWidth);
+        var k;
+        for (k = 1; k < SHAPE.cols; k++) {
+          line(k * tw - gridWidth / 2, 0, gridWidth, SHAPE.rows * th);
+        }
+        for (k = 1; k < SHAPE.rows; k++) {
+          line(0, k * th - gridWidth / 2, SHAPE.cols * tw, gridWidth);
         }
       }
 
@@ -312,7 +405,7 @@
   }
 
   // ── Camera: keep the sheet pinned on screen ────────────────────
-  // The whole point of the mode is that all 9 tiles sit in FIXED positions
+  // The whole point of the mode is that all the tiles sit in FIXED positions
   // on screen and selecting a frame only changes which cell is live. Piskel
   // keeps the editable canvas wherever the camera puts it, so we drive the
   // camera: fit the sheet when the mode becomes active, then re-center on
@@ -341,13 +434,16 @@
     sheetHash: function () {
       return setHash(currentBase());
     },
+    shape: function () {
+      return { name: SHAPE.name, cols: SHAPE.cols, rows: SHAPE.rows, size: SHAPE.size };
+    },
     tileOrigin: function () {
       if (!cameraActive()) {
         return null;
       }
       var pc = controller();
       var rel = pc.getCurrentFrameIndex() - currentBase();
-      return { x: (rel % 3) * pc.getWidth(), y: Math.floor(rel / 3) * pc.getHeight() };
+      return { x: (rel % SHAPE.cols) * pc.getWidth(), y: Math.floor(rel / SHAPE.cols) * pc.getHeight() };
     }
   };
 
@@ -358,7 +454,7 @@
       if (!cameraActive()) {
         return original.call(this, x, y);
       }
-      // The sheet extends up to two tiles beyond the frame; the stock clamp
+      // The sheet extends several tiles beyond the frame; the stock clamp
       // pins offsets to the frame itself and would forbid showing it. Allow
       // the camera anywhere that keeps the sheet within reach of the
       // viewport (viewport size in sprite pixels = display / zoom).
@@ -367,8 +463,8 @@
       var h = pc.getHeight();
       var vw = this.displayWidth / this.zoom;
       var vh = this.displayHeight / this.zoom;
-      this.offset.x = pskl.utils.Math.minmax(x, -(2 * w + vw), 3 * w + vw);
-      this.offset.y = pskl.utils.Math.minmax(y, -(2 * h + vh), 3 * h + vh);
+      this.offset.x = pskl.utils.Math.minmax(x, -((SHAPE.cols - 1) * w + vw), SHAPE.cols * w + vw);
+      this.offset.y = pskl.utils.Math.minmax(y, -((SHAPE.rows - 1) * h + vh), SHAPE.rows * h + vh);
     };
   }
 
@@ -386,10 +482,10 @@
     }
     var w = pc.getWidth();
     var h = pc.getHeight();
-    // 3 tiles plus breathing room on each side. Zoom the WHOLE renderer
+    // The sheet plus breathing room on each side. Zoom the WHOLE renderer
     // stack (composite), never a single canvas, or margins diverge and the
     // stacked canvases stop lining up.
-    var zoom = Math.max(1, Math.min(rect.width / (w * 3.4), rect.height / (h * 3.4)));
+    var zoom = Math.max(1, Math.min(rect.width / (w * (SHAPE.cols + 0.4)), rect.height / (h * (SHAPE.rows + 0.4))));
     if (dc.setZoom_) {
       dc.setZoom_(zoom);
     } else {
@@ -408,12 +504,13 @@
     var w = pc.getWidth();
     var h = pc.getHeight();
     var rel = pc.getCurrentFrameIndex() - currentBase();
-    var col = rel % 3;
-    var row = Math.floor(rel / 3);
+    var col = rel % SHAPE.cols;
+    var row = Math.floor(rel / SHAPE.cols);
     // Piskel centers the FRAME on screen when offset is 0 (margin term), so
     // centering the SHEET reduces to: offset = sheetCenter - frameCenter,
-    // which is ((1-col)*w, (1-row)*h). Independent of zoom and viewport.
-    dc.setOffset((1 - col) * w, (1 - row) * h);
+    // which is ((cols-1)/2 - col) tiles across and the same down (for 3x3,
+    // (1-col, 1-row)). Independent of zoom and viewport.
+    dc.setOffset(((SHAPE.cols - 1) / 2 - col) * w, ((SHAPE.rows - 1) / 2 - row) * h);
     lastPos = { col: col, row: row };
   }
 
@@ -422,7 +519,7 @@
     if (!active) {
       lastPos = null;
       if (wasActive) {
-        // Mode just deactivated (undo below 9 frames, or the kid selected a
+        // Mode just deactivated (undo below a whole set, or the kid selected a
         // frame in an incomplete bank): hand the camera back in a legal
         // state instead of leaving a sheet-view offset behind.
         wasActive = false;
@@ -434,7 +531,7 @@
     if (!wasActive) {
       // Mode just became active. This is how the sheet view engages when a
       // saved project finishes loading (the platform adapter sets the
-      // piskel asynchronously, well after boot), when a set gets its 9th
+      // piskel asynchronously, well after boot), when a set gets its last
       // frame, or after a redo.
       wasActive = true;
       fitSheet();
@@ -442,8 +539,8 @@
     }
     var pc = controller();
     var rel = pc.getCurrentFrameIndex() - currentBase();
-    var col = rel % 3;
-    var row = Math.floor(rel / 3);
+    var col = rel % SHAPE.cols;
+    var row = Math.floor(rel / SHAPE.cols);
     if (lastPos && lastPos.col === col && lastPos.row === row) {
       return;
     }
@@ -456,8 +553,8 @@
 
   // ── Paint anywhere on the sheet ────────────────────────────────
   // Piskel tools only ever write to the current frame, and out-of-bounds
-  // pixels are silently dropped. Rather than teach every tool about a 3x3
-  // surface, the current frame follows the pointer: pressing on a tile
+  // pixels are silently dropped. Rather than teach every tool about a
+  // many-tile surface, the current frame follows the pointer: pressing on a tile
   // makes that tile current before the tool sees the event. The camera
   // re-centers on the switch, so nothing moves on screen and the tool gets
   // ordinary in-frame coordinates.
@@ -468,12 +565,12 @@
   function cellAt(coords) {
     var pc = controller();
     var rel = pc.getCurrentFrameIndex() - currentBase();
-    var col = (rel % 3) + Math.floor(coords.x / pc.getWidth());
-    var row = Math.floor(rel / 3) + Math.floor(coords.y / pc.getHeight());
-    if (col < 0 || col > 2 || row < 0 || row > 2) {
+    var col = (rel % SHAPE.cols) + Math.floor(coords.x / pc.getWidth());
+    var row = Math.floor(rel / SHAPE.cols) + Math.floor(coords.y / pc.getHeight());
+    if (col < 0 || col >= SHAPE.cols || row < 0 || row >= SHAPE.rows) {
       return -1;
     }
-    return currentBase() + row * 3 + col;
+    return currentBase() + row * SHAPE.cols + col;
   }
 
   function makeLive(dc, index) {
@@ -506,8 +603,8 @@
     var w = pc.getWidth();
     var h = pc.getHeight();
     var rel = pc.getCurrentFrameIndex() - currentBase();
-    var liveCol = rel % 3;
-    var liveRow = Math.floor(rel / 3);
+    var liveCol = rel % SHAPE.cols;
+    var liveRow = Math.floor(rel / SHAPE.cols);
     var base = currentBase();
 
     var fromCol = tool.previousCol === null ? coords.x : tool.previousCol;
@@ -522,13 +619,13 @@
       var sy = originY + line[i].row;
       var col = Math.floor(sx / w);
       var row = Math.floor(sy / h);
-      if (col < 0 || col > 2 || row < 0 || row > 2) {
+      if (col < 0 || col >= SHAPE.cols || row < 0 || row >= SHAPE.rows) {
         continue;
       }
       if (col !== liveCol || row !== liveRow) {
         tool.releaseToolAt(tool.previousCol, tool.previousRow, pc.getCurrentFrame(), dc.overlayFrame, event);
         $.publish(Events.TOOL_RELEASED);
-        makeLive(dc, base + row * 3 + col);
+        makeLive(dc, base + row * SHAPE.cols + col);
         $.publish(Events.TOOL_PRESSED);
         liveCol = col;
         liveRow = row;
@@ -660,14 +757,15 @@
     if (!pc || !hasFullSet()) {
       hint.style.display = 'block';
       body.style.display = 'none';
-      var have = pc ? Math.min(9, pc.getFrameCount() - base) : 0;
+      var have = pc ? Math.min(SHAPE.size, pc.getFrameCount() - base) : 0;
       hint.querySelector('.tt-hint-count').textContent = have;
+      hint.querySelector('.tt-hint-need').textContent = SHAPE.size;
       return;
     }
     hint.style.display = 'none';
     body.style.display = 'block';
     panel.querySelector('.tt-title').textContent =
-      'Transition preview' + (base > 0 ? ' (set ' + (base / 9 + 1) + ')' : '');
+      'Transition preview' + (base > 0 ? ' (set ' + (base / SHAPE.size + 1) + ')' : '');
 
     var hash = setHash(base);
     if (!force && hash === lastRenderHash) {
@@ -682,39 +780,44 @@
     var tw = pc.getCurrentFrame().getWidth();
     var th = pc.getCurrentFrame().getHeight();
 
-    // Sheet map: the raw 3x3, clickable.
-    sheetCanvas.width = 3 * tw;
-    sheetCanvas.height = 3 * th;
+    // Sheet map: the raw sheet, clickable.
+    sheetCanvas.width = SHAPE.cols * tw;
+    sheetCanvas.height = SHAPE.rows * th;
     var sctx = sheetCanvas.getContext('2d');
     sctx.imageSmoothingEnabled = false;
     sctx.clearRect(0, 0, sheetCanvas.width, sheetCanvas.height);
-    for (var i = 0; i < 9; i++) {
+    for (var i = 0; i < SHAPE.size; i++) {
       var t = tileCanvas(base + i);
       if (t) {
-        sctx.drawImage(t, (i % 3) * tw, Math.floor(i / 3) * th, tw, th);
+        sctx.drawImage(t, (i % SHAPE.cols) * tw, Math.floor(i / SHAPE.cols) * th, tw, th);
       }
     }
     // Cell grid, then highlight the tile being edited.
     sctx.strokeStyle = 'rgba(255,255,255,.22)';
     sctx.lineWidth = 1;
-    for (var sg = 0; sg <= 3; sg++) {
+    var sg;
+    for (sg = 0; sg <= SHAPE.cols; sg++) {
       sctx.beginPath();
       sctx.moveTo(sg * tw + 0.5, 0);
       sctx.lineTo(sg * tw + 0.5, sheetCanvas.height);
       sctx.stroke();
+    }
+    for (sg = 0; sg <= SHAPE.rows; sg++) {
       sctx.beginPath();
       sctx.moveTo(0, sg * th + 0.5);
       sctx.lineTo(sheetCanvas.width, sg * th + 0.5);
       sctx.stroke();
     }
     var rel = pc.getCurrentFrameIndex() - base;
-    if (rel >= 0 && rel <= 8) {
+    if (rel >= 0 && rel < SHAPE.size) {
       var lw = Math.max(1, Math.round(tw / 16));
+      var mx = (rel % SHAPE.cols) * tw;
+      var my = Math.floor(rel / SHAPE.cols) * th;
       sctx.lineWidth = lw;
       sctx.strokeStyle = 'rgba(0, 0, 0, .7)';
-      sctx.strokeRect((rel % 3) * tw + 0.5 + lw, Math.floor(rel / 3) * th + 0.5 + lw, tw - 1 - 2 * lw, th - 1 - 2 * lw);
+      sctx.strokeRect(mx + 0.5 + lw, my + 0.5 + lw, tw - 1 - 2 * lw, th - 1 - 2 * lw);
       sctx.strokeStyle = ACCENT;
-      sctx.strokeRect((rel % 3) * tw + 0.5, Math.floor(rel / 3) * th + 0.5, tw - 1, th - 1);
+      sctx.strokeRect(mx + 0.5, my + 0.5, tw - 1, th - 1);
     }
   }
 
@@ -724,7 +827,7 @@
   // several sets needs the one in between, and it is the default here
   // because the sheet on screen reads as one picture.
 
-  // The bucket starts on one tile. A new set is nine empty tiles, and a
+  // The bucket starts on one tile. A new set is all empty tiles, and a
   // fill that crossed seams there would flood the whole sheet from a click
   // meant for one tile.
   var REACH = {
@@ -779,7 +882,7 @@
     }
   }
 
-  // Flood fill over the whole set. The nine tiles are laid into one frame
+  // Flood fill over the whole set. The tiles are laid into one frame
   // so piskel's own fill does the work, then only the pixels it changed are
   // written back. x and y are in sheet space.
   function fillSet(base, x, y, color) {
@@ -787,15 +890,16 @@
     var layer = pc.getCurrentLayer();
     var w = pc.getWidth();
     var h = pc.getHeight();
-    var sheet = new pskl.model.Frame(3 * w, 3 * h);
+    var cols = SHAPE.cols;
+    var sheet = new pskl.model.Frame(cols * w, SHAPE.rows * h);
     var tiles = [];
     var i;
-    for (i = 0; i < 9; i++) {
+    for (i = 0; i < SHAPE.size; i++) {
       tiles.push(layer.getFrameAt(base + i));
     }
     tiles.forEach(function (tile, n) {
-      var ox = (n % 3) * w;
-      var oy = Math.floor(n / 3) * h;
+      var ox = (n % cols) * w;
+      var oy = Math.floor(n / cols) * h;
       tile.forEachPixel(function (c, col, row) {
         sheet.setPixel(ox + col, oy + row, c);
       });
@@ -803,11 +907,11 @@
     var before = sheet.getPixels();
     pskl.PixelUtils.paintSimilarConnectedPixelsFromFrame(sheet, x, y, color);
     sheet.forEachPixel(function (c, col, row) {
-      if (c !== before[row * 3 * w + col]) {
-        tiles[Math.floor(row / h) * 3 + Math.floor(col / w)].setPixel(col % w, row % h, c);
+      if (c !== before[row * cols * w + col]) {
+        tiles[Math.floor(row / h) * cols + Math.floor(col / w)].setPixel(col % w, row % h, c);
       }
     });
-    for (i = 0; i < 9; i++) {
+    for (i = 0; i < SHAPE.size; i++) {
       touched(base + i);
     }
   }
@@ -824,8 +928,8 @@
       var pc = controller();
       var base = currentBase();
       var rel = pc.getCurrentFrameIndex() - base;
-      var x = (rel % 3) * pc.getWidth() + col;
-      var y = Math.floor(rel / 3) * pc.getHeight() + row;
+      var x = (rel % SHAPE.cols) * pc.getWidth() + col;
+      var y = Math.floor(rel / SHAPE.cols) * pc.getHeight() + row;
       var color = this.getToolColor();
       fillSet(base, x, y, color);
       this.raiseSaveStateEvent({ setBase: base, x: x, y: y, color: color });
@@ -843,7 +947,7 @@
     var pc = controller();
     var layers = allLayers ? pc.getLayers() : [pc.getCurrentLayer()];
     layers.forEach(function (layer) {
-      for (var i = base; i < base + 9; i++) {
+      for (var i = base; i < base + SHAPE.size; i++) {
         var frame = layer.getFrameAt(i);
         if (frame) {
           tool.applyToolOnFrame_(frame, oldColor, newColor);
@@ -874,7 +978,7 @@
       var count = pc.getFrameCount();
       if (reach === 'set') {
         first = currentBase();
-        count = 9;
+        count = SHAPE.size;
         swapInSet(this, first, oldColor, newColor, allLayers);
       } else {
         this.swapColors_(oldColor, newColor, allLayers, true);
@@ -920,15 +1024,6 @@
   var SAME_COLOR = 24;
   // Texture: a patch of one color this small, counting diagonal touches.
   var SPECK_MAX = 2;
-
-  // [tile A, direction to B, tile B]. The first twelve are the seams
-  // inside the sheet. The rest are tiles that repeat against themselves on
-  // a real map: edges run along their own direction, the center both ways.
-  var SEAMS = [
-    [0, 'r', 1], [1, 'r', 2], [3, 'r', 4], [4, 'r', 5], [6, 'r', 7], [7, 'r', 8],
-    [0, 'b', 3], [3, 'b', 6], [1, 'b', 4], [4, 'b', 7], [2, 'b', 5], [5, 'b', 8],
-    [1, 'r', 1], [7, 'r', 7], [3, 'b', 3], [5, 'b', 5], [4, 'r', 4], [4, 'b', 4]
-  ];
 
   var seamsOn = false;
   var seamPick = '';    // the one seam whose marks are showing, when a row is picked
@@ -1143,6 +1238,9 @@
     var w = tiles[0].w;
     var h = tiles[0].h;
     var drawn = tiles.filter(function (t) { return !t.empty; });
+    // What "most tiles" means: 4 of a 3x3's 9 (the outer material covers
+    // most of 8 of them), half of a strip.
+    var majority = tiles.length === 9 ? 4 : Math.max(2, Math.ceil(drawn.length / 2));
     var common = new Uint32Array(w * h);
     var known = new Uint8Array(w * h);
     for (var i = 0; i < w * h; i++) {
@@ -1150,14 +1248,14 @@
       for (var t = 0; t < drawn.length; t++) {
         var c = drawn[t].px[i];
         count[c] = (count[c] || 0) + 1;
-        if (count[c] >= 4) {
+        if (count[c] >= majority) {
           common[i] = c;
           known[i] = 1;
         }
       }
     }
     var refs = [{ px: common, known: known, fleck: fleckMask(common, w, h) }];
-    if (!tiles[4].empty) {
+    if (tiles.length === 9 && !tiles[4].empty) {
       refs.push({ px: tiles[4].px, known: null, fleck: fleckMask(tiles[4].px, w, h) });
     }
     return function (tile, x, y) {
@@ -1180,40 +1278,48 @@
   // nowhere else. Works on raw color classes, since dropSpecks would blur
   // a fine pattern.
   function patternRuns(strip, dir, a) {
+    var continues = periodTwo(strip, dir, a);
     var W = strip.W;
     var H = strip.H;
     var cls = strip.cls;
-    var seen = null;
-    var deep = 4;
     var along = 3;
-    var key = function (x0, y0) {
-      var s = '';
-      for (var j = 0; j < along; j++) {
-        for (var i = 0; i < deep; i++) {
-          s += (dir === 'r' ? cls[(y0 + j) * W + x0 + i] : cls[(y0 + i) * W + x0 + j]) + ',';
-        }
-      }
-      return s;
-    };
     var edge = dir === 'r' ? a.w : a.h;
     var span = dir === 'r' ? H : W;
     var depth = dir === 'r' ? W : H;
-    return function (k) {
-      if (edge < deep || span < along) {
+    var tables = [4].map(function (deep) {
+      var key = function (x0, y0) {
+        var s = '';
+        for (var j = 0; j < along; j++) {
+          for (var i = 0; i < deep; i++) {
+            s += (dir === 'r' ? cls[(y0 + j) * W + x0 + i] : cls[(y0 + i) * W + x0 + j]) + ',';
+          }
+        }
+        return s;
+      };
+      return { deep: deep, key: key, seen: null };
+    });
+    var found = function (table, k) {
+      var deep = table.deep;
+      if (edge < deep / 2 || span < along) {
         return false;
       }
-      if (!seen) {
-        seen = {};
+      if (!table.seen) {
+        table.seen = {};
         for (var d = 0; d + deep <= depth; d++) {
           // Patches that cross the seam do not count as evidence.
           if (d < edge && d + deep > edge) {
             continue;
           }
           for (var t = 0; t + along <= span; t++) {
-            seen[dir === 'r' ? key(d, t) : key(t, d)] = 1;
+            table.seen[dir === 'r' ? table.key(d, t) : table.key(t, d)] = 1;
           }
         }
       }
+      var t0 = Math.min(Math.max(k - 1, 0), span - along);
+      var d0 = edge - deep / 2;
+      return !!(dir === 'r' ? table.seen[table.key(d0, t0)] : table.seen[table.key(t0, d0)]);
+    };
+    return function (k) {
       // Only a seam the colors alternate through. Solid shapes meet the
       // seam with the same color behind them, and that is checked as before.
       var at = dir === 'r' ? k * W + edge - 1 : (edge - 1) * W + k;
@@ -1221,8 +1327,33 @@
       if (cls[at] === cls[at - step] && cls[at + step] === cls[at + 2 * step]) {
         return false;
       }
-      var t0 = Math.min(Math.max(k - 1, 0), span - along);
-      return !!(dir === 'r' ? seen[key(edge - 2, t0)] : seen[key(t0, edge - 2)]);
+      return found(tables[0], k) || continues(k);
+    };
+  }
+
+  // A band of a pattern that straddles the seam (a ramp step four rows
+  // tall, two in each tile, as in a gradient strip) never sits whole inside
+  // one tile, so the patch test cannot vouch for it. It still continues the
+  // way every two-row pattern does: the two rows past the seam repeat the
+  // two before it. A tile drawn a row or two off breaks that.
+  function periodTwo(strip, dir, a) {
+    var W = strip.W;
+    var cls = strip.cls;
+    var edge = dir === 'r' ? a.w : a.h;
+    var span = dir === 'r' ? strip.H : W;
+    var px = function (d, t) {
+      return dir === 'r' ? cls[t * W + d] : cls[d * W + t];
+    };
+    return function (k) {
+      if (edge < 2) {
+        return false;
+      }
+      for (var t = Math.max(0, k - 1); t <= Math.min(span - 1, k + 1); t++) {
+        if (px(edge, t) !== px(edge - 2, t) || px(edge + 1, t) !== px(edge - 1, t)) {
+          return false;
+        }
+      }
+      return true;
     };
   }
 
@@ -1297,7 +1428,7 @@
   function checkSeams(base) {
     var tiles = [];
     var empty = [];
-    for (var i = 0; i < 9; i++) {
+    for (var i = 0; i < SHAPE.size; i++) {
       tiles.push(mergedTile(base + i));
       if (tiles[i].empty) {
         empty.push(i);
@@ -1306,7 +1437,7 @@
     var found = [];
     var wrecked = 0;
     var isTexture = textureOf(tiles);
-    SEAMS.forEach(function (seam) {
+    SHAPE.seams.forEach(function (seam) {
       var a = tiles[seam[0]];
       var b = tiles[seam[2]];
       // A tile that is not drawn yet is not a mistake.
@@ -1321,11 +1452,14 @@
         }
       }
     });
-    // Nine unrelated tiles (trees, rocks, signs) kept in one bank. Every
-    // edge differs from its neighbor and none of it is a mistake.
-    // Half of the twelve inner seams each broken along a quarter of their
-    // length is not a set with mistakes in it.
-    return { seams: found, empty: empty, checked: 9 - empty.length, unrelated: wrecked >= 6 };
+    // Unrelated tiles (trees, rocks, signs) kept in one bank. Every edge
+    // differs from its neighbor and none of it is a mistake. Half of the
+    // inner seams each broken along a quarter of their length is not a set
+    // with mistakes in it. A short strip has too few seams to tell.
+    return {
+      seams: found, empty: empty, checked: SHAPE.size - empty.length,
+      unrelated: SHAPE.inner >= 4 && wrecked >= SHAPE.inner / 2
+    };
   }
 
   function drawSeamMarks(ctx, z, tw, th) {
@@ -1337,15 +1471,15 @@
     ctx.fillStyle = seamPhase === 0 ? '#ffffff' : '#ff00e5';
     for (var i = 0; i < seamMarks.length; i++) {
       var m = seamMarks[i];
-      ctx.fillRect((m.pos % 3) * tw + m.at.x * z, Math.floor(m.pos / 3) * th + m.at.y * z, z, z);
+      ctx.fillRect((m.pos % SHAPE.cols) * tw + m.at.x * z, Math.floor(m.pos / SHAPE.cols) * th + m.at.y * z, z, z);
     }
   }
 
   function seamSays(seam) {
     // A tile against a copy of itself, the way it repeats on a map.
     var joins = seam.a !== seam.b ? ' and ' : (seam.stacked ? ' above ' : ' beside ');
-    var pair = '<b translate="no">' + LABELS[seam.a] + '</b>' + joins +
-      '<b translate="no">' + LABELS[seam.b] + '</b>';
+    var pair = '<b translate="no">' + SHAPE.labels[seam.a] + '</b>' + joins +
+      '<b translate="no">' + SHAPE.labels[seam.b] + '</b>';
     if (!seam.breaks) {
       return { pair: pair, what: 'line on the edge' };
     }
@@ -1379,7 +1513,7 @@
     seamMarks = [];
     if (!result.unrelated) {
       result.seams.forEach(function (seam) {
-        if (picked ? seam === picked : seam.a !== seam.b) {
+        if (picked ? seam === picked : (seam.a !== seam.b || SHAPE.sideRepeats)) {
           seamMarks = seamMarks.concat(seam.marks);
         }
       });
@@ -1389,7 +1523,7 @@
     var repeated = [];
     if (!result.unrelated) {
       result.seams.forEach(function (seam) {
-        (seam.a === seam.b ? repeated : between).push(seam);
+        (seam.a === seam.b && !SHAPE.sideRepeats ? repeated : between).push(seam);
       });
     }
     var head;
@@ -1397,7 +1531,7 @@
     if (result.checked < 2) {
       head = 'Draw at least two tiles, then check again.';
     } else if (result.unrelated) {
-      head = 'These 9 tiles do not look like one transition set, so there are no seams to check.';
+      head = 'These ' + SHAPE.size + ' tiles do not look like one transition set, so there are no seams to check.';
     } else if (!between.length) {
       head = 'Every tile lines up with its neighbors.';
       cls += ' tt-seams-good';
@@ -1422,7 +1556,7 @@
     }
     if (result.empty.length && result.checked >= 2 && !result.unrelated) {
       html += '<div class="tt-seams-note">Not checked, still empty: <span translate="no">' +
-        result.empty.map(function (p) { return LABELS[p]; }).join(', ') + '</span></div>';
+        result.empty.map(function (p) { return SHAPE.labels[p]; }).join(', ') + '</span></div>';
     }
     if (box.innerHTML !== html) {
       box.innerHTML = html;
@@ -1456,12 +1590,10 @@
   var ICON_PLUS = '<svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg>';
 
   // Tiles that are each other flipped. The center has no partner.
-  var PARTNERS = [[0, 2, 6, 8], [1, 7], [3, 5]];
-
   function partnersOf(pos) {
-    for (var i = 0; i < PARTNERS.length; i++) {
-      if (PARTNERS[i].indexOf(pos) !== -1) {
-        return PARTNERS[i].filter(function (p) { return p !== pos; });
+    for (var i = 0; i < SHAPE.partners.length; i++) {
+      if (SHAPE.partners[i].indexOf(pos) !== -1) {
+        return SHAPE.partners[i].filter(function (p) { return p !== pos; });
       }
     }
     return [];
@@ -1484,14 +1616,14 @@
 
   function emptyPairs(base) {
     var pairs = [];
-    PARTNERS.forEach(function (group) {
+    SHAPE.partners.forEach(function (group) {
       var drawn = group.filter(function (p) { return !tileEmpty(base + p); });
       if (!drawn.length) {
         return;
       }
       group.forEach(function (p) {
         if (drawn.indexOf(p) === -1) {
-          pairs.push([base + drawn[0], base + p]);
+          pairs.push(pairOf(base, drawn[0], p));
         }
       });
     });
@@ -1506,7 +1638,7 @@
       return [];
     }
     return partnersOf(cur - base).map(function (p) {
-      return [cur, base + p];
+      return pairOf(base, cur - base, p);
     });
   }
 
@@ -1523,13 +1655,18 @@
     dst.setPixels(to);
   }
 
+  // [source frame, target frame, flip across, flip down]. The flips are
+  // decided with the pair, so redo flips the same way even if the set
+  // shape has changed since.
+  function pairOf(base, a, b) {
+    return [base + a, base + b, a % SHAPE.cols !== b % SHAPE.cols,
+      Math.floor(a / SHAPE.cols) !== Math.floor(b / SHAPE.cols)];
+  }
+
   function applyPairs(pairs) {
     controller().getLayers().forEach(function (layer) {
       pairs.forEach(function (pair) {
-        var a = pair[0] % 9;
-        var b = pair[1] % 9;
-        flipInto(layer.getFrameAt(pair[0]), layer.getFrameAt(pair[1]),
-          a % 3 !== b % 3, Math.floor(a / 3) !== Math.floor(b / 3));
+        flipInto(layer.getFrameAt(pair[0]), layer.getFrameAt(pair[1]), pair[2], pair[3]);
       });
     });
     pairs.forEach(function (pair) {
@@ -1568,26 +1705,26 @@
     var pos = pc.getCurrentFrameIndex() - currentBase();
     var partners = partnersOf(pos);
     if (!partners.length) {
-      says.textContent = 'The center tile has no mirror';
+      says.textContent = SHAPE.cols === 1 ? 'The middle tile has no mirror' : 'The center tile has no mirror';
       liveBtn.disabled = true;
       liveBtn.title = 'Pick a corner or an edge tile to mirror it.';
       return;
     }
-    var to = partners.map(function (p) { return LABELS[p]; }).join(', ');
-    says.textContent = 'Mirror ' + LABELS[pos] + ' onto ' + to;
+    var to = partners.map(function (p) { return SHAPE.labels[p]; }).join(', ');
+    says.textContent = 'Mirror ' + SHAPE.labels[pos] + ' onto ' + to;
     liveBtn.disabled = tileEmpty(pc.getCurrentFrameIndex());
     liveBtn.title = liveBtn.disabled ? 'This tile is empty, so there is nothing to mirror.' :
-      'Replace ' + to + ' with flipped copies of ' + LABELS[pos] + '. Undo brings them back.';
+      'Replace ' + to + ' with flipped copies of ' + SHAPE.labels[pos] + '. Undo brings them back.';
   }
 
   // Runs against the inner controller: the public one records every frame
   // operation as its own history step, and nine undos for one button press
   // is not what anyone means by undo.
-  function copySet(base) {
+  function copySet(base, size) {
     var inner = controller().piskelController;
     inner.getLayers().forEach(function (layer) {
-      for (var i = 0; i < 9; i++) {
-        layer.addFrameAt(layer.getFrameAt(base + i).clone(), base + 9 + i);
+      for (var i = 0; i < size; i++) {
+        layer.addFrameAt(layer.getFrameAt(base + i).clone(), base + size + i);
       }
     });
   }
@@ -1602,16 +1739,16 @@
     var base = currentBase();
     var rel = pc.getCurrentFrameIndex() - base;
     var state = { frameIndex: pc.getCurrentFrameIndex(), layerIndex: pc.getCurrentLayerIndex() };
-    copySet(base);
+    copySet(base, SHAPE.size);
     $.publish(Events.PISKEL_SAVE_STATE, {
       type: pskl.service.HistoryService.REPLAY,
-      scope: { replay: function (frame, data) { copySet(data.base); } },
-      replay: { base: base },
+      scope: { replay: function (frame, data) { copySet(data.base, data.size); } },
+      replay: { base: base, size: SHAPE.size },
       state: state
     });
     // Same tile, new set: the sheet on screen is replaced by its copy with
     // nothing appearing to move.
-    pc.setCurrentFrameIndex(base + 9 + rel);
+    pc.setCurrentFrameIndex(base + SHAPE.size + rel);
     cache = {};
     renderSheet(true);
     badgeFrameList();
@@ -1637,8 +1774,13 @@
     panel.id = 'tt-panel';
     panel.innerHTML =
       '<div class="tt-title-row"><span class="tt-title">Transition preview</span></div>' +
-      '<div class="tt-hint" style="display:none">This set needs 9 frames (it has <span class="tt-hint-count">0</span>). ' +
-      'Each frame is one tile of the 3x3 set. <button type="button" class="tt-make-frames tt-action">' +
+      '<label class="tt-shape-row">Set shape <select class="tt-shape">' +
+      SHAPE_NAMES.map(function (name) {
+        return '<option value="' + name + '">' +
+          (name === '3x3' ? '3x3 set' : 'Strip, ' + name.slice(6) + ' tall') + '</option>';
+      }).join('') + '</select></label>' +
+      '<div class="tt-hint" style="display:none">This set needs <span class="tt-hint-need">9</span> frames ' +
+      '(it has <span class="tt-hint-count">0</span>). Each frame is one tile of the set. <button type="button" class="tt-make-frames tt-action">' +
       ICON_PLUS + '<span>Add frames to finish this set</span></button></div>' +
       '<div class="tt-body">' +
       '  <canvas class="tt-sheet" title="Click a tile to edit it"></canvas>' +
@@ -1654,7 +1796,7 @@
       '<button type="button" class="tt-mirror-live tt-action">' +
       ICON_MIRROR + '<span class="tt-mirror-live-says"></span></button>' +
       '<button type="button" class="tt-duplicate tt-action" ' +
-      'title="Copy all 9 tiles into a new set, right after this one">' +
+      'title="Copy every tile into a new set, right after this one">' +
       ICON_COPY + '<span>Duplicate this set</span></button>' +
       '<button type="button" class="tt-seam-check tt-action" ' +
       'title="Flash the pixels where one tile does not continue into the tile next to it. Nothing is changed.">' +
@@ -1672,14 +1814,19 @@
         return;
       }
       var rect = sheetCanvas.getBoundingClientRect();
-      var c = Math.floor((evt.clientX - rect.left) / (rect.width / 3));
-      var r = Math.floor((evt.clientY - rect.top) / (rect.height / 3));
-      c = pskl.utils.Math.minmax(c, 0, 2);
-      r = pskl.utils.Math.minmax(r, 0, 2);
-      pc.setCurrentFrameIndex(currentBase() + r * 3 + c);
+      var c = Math.floor((evt.clientX - rect.left) / (rect.width / SHAPE.cols));
+      var r = Math.floor((evt.clientY - rect.top) / (rect.height / SHAPE.rows));
+      c = pskl.utils.Math.minmax(c, 0, SHAPE.cols - 1);
+      r = pskl.utils.Math.minmax(r, 0, SHAPE.rows - 1);
+      pc.setCurrentFrameIndex(currentBase() + r * SHAPE.cols + c);
     });
 
     panel.querySelector('.tt-duplicate').addEventListener('click', duplicateSet);
+    var shapePick = panel.querySelector('.tt-shape');
+    shapePick.value = SHAPE.name;
+    shapePick.addEventListener('change', function () {
+      setShape(shapePick.value);
+    });
     panel.querySelector('.tt-seam-check').addEventListener('click', function () {
       setSeamsOn(!seamsOn);
     });
@@ -1713,7 +1860,7 @@
         return;
       }
       var base = currentBase();
-      while (pc.getFrameCount() < base + 9) {
+      while (pc.getFrameCount() < base + SHAPE.size) {
         pc.addFrame();
       }
       pc.setCurrentFrameIndex(base);
@@ -1735,17 +1882,17 @@
     var inSet = isEnabled() && bankComplete(bankBase(index));
     // Frames past the last whole set. Only worth saying when there IS a set
     // above them to be told apart from.
-    var loose = isEnabled() && !inSet && index >= 9 && index === bankBase(index);
-    var setNo = Math.floor(index / 9) + 1;
+    var loose = isEnabled() && !inSet && index >= SHAPE.size && index === bankBase(index);
+    var setNo = Math.floor(index / SHAPE.size) + 1;
 
     tile.classList.toggle('tt-in-set', inSet);
     tile.classList.toggle('tt-set-alt', inSet && setNo % 2 === 0);
-    tile.classList.toggle('tt-set-start', (inSet && index % 9 === 0) || loose);
-    tile.classList.toggle('tt-set-end', inSet && index % 9 === 8);
+    tile.classList.toggle('tt-set-start', (inSet && index % SHAPE.size === 0) || loose);
+    tile.classList.toggle('tt-set-end', inSet && index % SHAPE.size === SHAPE.size - 1);
 
     var label = tile.querySelector('.tt-set-label');
     var text = '';
-    if (inSet && index % 9 === 0) {
+    if (inSet && index % SHAPE.size === 0) {
       text = 'Set ' + setNo;
     } else if (loose) {
       text = count - index === 1 ? 'Extra frame' : 'Extra frames';
@@ -1781,8 +1928,8 @@
           badge.className = 'tt-badge';
           tiles[i].appendChild(badge);
         }
-        var setNo = Math.floor(i / 9) + 1;
-        badge.textContent = LABELS[i % 9] + (setNo > 1 ? setNo : '');
+        var setNo = Math.floor(i / SHAPE.size) + 1;
+        badge.textContent = SHAPE.labels[i % SHAPE.size] + (setNo > 1 ? setNo : '');
       } else if (badge) {
         badge.parentNode.removeChild(badge);
       }
@@ -1800,9 +1947,10 @@
     div.innerHTML =
       '<div class="preferences-hint">Transition sets</div>' +
       '<label class="preferences-checkbox-label">' +
-      '  <input type="checkbox" class="tt-enable-checkbox"> Group frames into 3x3 transition tilesets' +
+      '  <input type="checkbox" class="tt-enable-checkbox"> Group frames into transition sets' +
       '</label>' +
-      '<div class="preferences-description">Every 9 frames form one set (frames 1-9, 10-18, and so on). ' +
+      '<div class="preferences-description">Frames are grouped into sets: every 9 frames for a 3x3 set, ' +
+      'or the length of a strip. Pick the set shape in the transition panel. ' +
       'Shows the whole set around the canvas, and you can draw on any tile in it without picking its ' +
       'frame first. Pen and eraser strokes carry across the seams. Adds a set preview and labels each ' +
       'tile. Turns on tile mode.</div>' +
@@ -1835,28 +1983,30 @@
 
   function wholeBanks() {
     var pc = controller();
-    return isEnabled() && pc ? Math.floor(pc.getFrameCount() / 9) : 0;
+    return isEnabled() && pc ? Math.floor(pc.getFrameCount() / SHAPE.size) : 0;
   }
 
   // Sheet cell [col, row] for every frame, plus the sheet size in cells.
   function setSheetLayout(frameCount, wide) {
-    wide = Math.max(1, Math.min(wide, Math.floor(frameCount / 9)));
-    var columns = wide * 3;
+    var size = SHAPE.size;
+    var cols = SHAPE.cols;
+    wide = Math.max(1, Math.min(wide, Math.floor(frameCount / size)));
+    var columns = wide * cols;
     var cells = [];
     for (var i = 0; i < frameCount; i++) {
-      if (i < wide * 9) {
-        var tile = i % 9;
-        cells.push([Math.floor(i / 9) * 3 + tile % 3, Math.floor(tile / 3)]);
+      if (i < wide * size) {
+        var tile = i % size;
+        cells.push([Math.floor(i / size) * cols + tile % cols, Math.floor(tile / cols)]);
       } else {
-        var rest = i - wide * 9;
-        cells.push([rest % columns, 3 + Math.floor(rest / columns)]);
+        var rest = i - wide * size;
+        cells.push([rest % columns, SHAPE.rows + Math.floor(rest / columns)]);
       }
     }
-    var extras = frameCount - wide * 9;
+    var extras = frameCount - wide * size;
     return {
       wide: wide,
       columns: columns,
-      rows: 3 + Math.ceil(extras / columns),
+      rows: SHAPE.rows + Math.ceil(extras / columns),
       extras: extras,
       cells: cells
     };
@@ -1882,8 +2032,8 @@
       return;
     }
     var total = layout.cells.length;
-    var last = layout.wide * 9;
-    var text = layout.wide === 1 ? 'Frames 1-9 are the set at the top.' :
+    var last = layout.wide * SHAPE.size;
+    var text = layout.wide === 1 ? 'Frames 1-' + last + ' are the set at the top.' :
       'Frames 1-' + last + ' are ' + layout.wide + ' sets side by side.';
     if (layout.extras === 1) {
       text += ' Frame ' + total + ' goes underneath.';
@@ -1946,7 +2096,7 @@
       ctx.strokeStyle = ACCENT;
       ctx.lineWidth = 1;
       for (var k = 0; k < layout.wide; k++) {
-        ctx.strokeRect(k * 3 * tw + 0.5, 0.5, 3 * tw - 1, 3 * th - 1);
+        ctx.strokeRect(k * SHAPE.cols * tw + 0.5, 0.5, SHAPE.cols * tw - 1, SHAPE.rows * th - 1);
       }
     }
   }
@@ -2087,6 +2237,10 @@
       '  background-image: conic-gradient(#3a3a3a 25%, #2c2c2c 0 50%, #3a3a3a 0 75%, #2c2c2c 0);',
       '  background-size: 12px 12px; border: 1px solid #3d3d3d; }',
       '#tt-panel .tt-hint { color: #c9a53d; }',
+      '#tt-panel .tt-shape-row { display: flex; align-items: center; justify-content: space-between;',
+      '  margin-bottom: 6px; font-size: 11px; color: #8a8a8a; }',
+      '#tt-panel .tt-shape { height: 22px; margin-left: 6px; font-family: inherit; font-size: 11px;',
+      '  color: #ddd; background: #2e2e2e; border: 1px solid #4a4a4a; border-radius: 3px; }',
       '.tt-export-note { margin-top: 6px; font-size: 11px; line-height: 1.4; color: #b3b3b3; }',
       '.tt-export-preview { display: block; margin-top: 8px; max-width: 100%; image-rendering: pixelated;',
       '  background-image: conic-gradient(#3a3a3a 25%, #2c2c2c 0 50%, #3a3a3a 0 75%, #2c2c2c 0);',
@@ -2255,7 +2409,7 @@
       buildPanel();
       subscribeAll();
       syncUi();
-      // Booting straight into an existing 9-tile project: start in sheet view.
+      // Booting straight into a project with a whole set: start in sheet view.
       setTimeout(fitSheet, 600);
     } else {
       setTimeout(waitForPiskel, POLL_INTERVAL);

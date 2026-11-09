@@ -6,7 +6,8 @@
  * step. One button in the transition panel does that to the 3x3 sheet on
  * screen, and puts two strips beside it: the average color of every pixel
  * row down the middle column of tiles (T, C, B), and of every pixel column
- * across the middle row (L, C, R). A smooth strip is a smooth blend; a jump
+ * across the middle row (L, C, R). A strip set is one column, so it gets
+ * the down strip only, the full height of the gradient. A smooth strip is a smooth blend; a jump
  * points at the row to fix.
  *
  * The blur is a 1-2-1 average in art pixels, drawn as crisp blocks, not a
@@ -159,9 +160,9 @@
   var blurred = null;
   var stripDown = null;
   var stripAcross = null;
+  var shape = null;
   var jumpsDown = [];
   var jumpsAcross = [];
-  var sheetSize = null;
   var raf = 0;
 
   function sheet() {
@@ -169,20 +170,20 @@
     return t && t.active && t.active() ? t : null;
   }
 
-  // The 9 tiles as one 3w x 3h RGBA picture.
-  function readSheet(t, w, h) {
-    var W = 3 * w;
-    var H = 3 * h;
+  // The set's tiles as one RGBA picture, laid out as on the sheet.
+  function readSheet(t, w, h, sh) {
+    var W = sh.cols * w;
+    var H = sh.rows * h;
     var px = new Uint8ClampedArray(W * H * 4);
     var base = t.base();
-    for (var i = 0; i < 9; i++) {
+    for (var i = 0; i < sh.size; i++) {
       var cv = t.tileCanvas(base + i);
       if (!cv) {
         continue;
       }
       var data = cv.getContext('2d').getImageData(0, 0, w, h).data;
-      var ox = (i % 3) * w;
-      var oy = Math.floor(i / 3) * h;
+      var ox = (i % sh.cols) * w;
+      var oy = Math.floor(i / sh.cols) * h;
       for (var y = 0; y < h; y++) {
         px.set(data.subarray(y * w * 4, (y + 1) * w * 4), ((oy + y) * W + ox) * 4);
       }
@@ -191,18 +192,23 @@
   }
 
   function rebuild(t, w, h) {
-    var s = readSheet(t, w, h);
+    var sh = t.shape();
+    shape = sh;
+    var s = readSheet(t, w, h, sh);
     var soft = blur(s.px, s.W, s.H);
     var img = new ImageData(soft, s.W, s.H);
     blurred = document.createElement('canvas');
     blurred.width = s.W;
     blurred.height = s.H;
     blurred.getContext('2d').putImageData(img, 0, 0);
-    stripDown = strip(soft, s.W, s.H, true, w, 2 * w);
-    stripAcross = strip(soft, s.W, s.H, false, h, 2 * h);
+    // Down the middle column, and across the middle row when there is one
+    // to cross (a strip is a single column, so it only gets the down strip).
+    var mc = Math.floor(sh.cols / 2);
+    var mr = Math.floor(sh.rows / 2);
+    stripDown = strip(soft, s.W, s.H, true, mc * w, (mc + 1) * w);
+    stripAcross = sh.cols >= 3 ? strip(soft, s.W, s.H, false, mr * h, (mr + 1) * h) : null;
     jumpsDown = jumps(stripDown);
-    jumpsAcross = jumps(stripAcross);
-    sheetSize = { w: w, h: h };
+    jumpsAcross = stripAcross ? jumps(stripAcross) : [];
   }
 
   function rgba(c) {
@@ -246,11 +252,11 @@
     var rect = host.getBoundingClientRect();
     var rel = pc.getCurrentFrameIndex() - sheet().base();
     // getScreenCoordinates answers with the center of a pixel, in page space.
-    var c = dc.getScreenCoordinates(-(rel % 3) * w, -Math.floor(rel / 3) * h);
+    var c = dc.getScreenCoordinates(-(rel % shape.cols) * w, -Math.floor(rel / shape.cols) * h);
     var left = c.x - z / 2 - rect.left - window.pageXOffset;
     var top = c.y - z / 2 - rect.top - window.pageYOffset;
-    var W = 3 * w * z;
-    var H = 3 * h * z;
+    var W = shape.cols * w * z;
+    var H = shape.rows * h * z;
 
     // A neutral backdrop, so see-through areas read as nothing rather than
     // as the checkerboard and art underneath.
@@ -261,25 +267,31 @@
 
     var sx = left + W + STRIP_GAP;
     var sy = top + H + STRIP_GAP;
+    var k;
     ctx.fillStyle = '#111';
     ctx.fillRect(sx - 1, top - 1, STRIP_SIZE + 2, H + 2);
-    ctx.fillRect(left - 1, sy - 1, W + 2, STRIP_SIZE + 2);
     ctx.fillStyle = BACKDROP;
     ctx.fillRect(sx, top, STRIP_SIZE, H);
-    ctx.fillRect(left, sy, W, STRIP_SIZE);
-    var k;
     for (k = 0; k < stripDown.length; k++) {
       ctx.fillStyle = rgba(stripDown[k]);
       ctx.fillRect(sx, top + k * z, STRIP_SIZE, Math.ceil(z));
     }
-    for (k = 0; k < stripAcross.length; k++) {
-      ctx.fillStyle = rgba(stripAcross[k]);
-      ctx.fillRect(left + k * z, sy, Math.ceil(z), STRIP_SIZE);
+    if (stripAcross) {
+      ctx.fillStyle = '#111';
+      ctx.fillRect(left - 1, sy - 1, W + 2, STRIP_SIZE + 2);
+      ctx.fillStyle = BACKDROP;
+      ctx.fillRect(left, sy, W, STRIP_SIZE);
+      for (k = 0; k < stripAcross.length; k++) {
+        ctx.fillStyle = rgba(stripAcross[k]);
+        ctx.fillRect(left + k * z, sy, Math.ceil(z), STRIP_SIZE);
+      }
     }
     // Tile edges, so a jump can be read against the seam it sits on.
     ctx.fillStyle = '#111';
-    for (k = 1; k < 3; k++) {
+    for (k = 1; k < shape.rows; k++) {
       ctx.fillRect(sx - 3, top + k * h * z - 1, 3, 2);
+    }
+    for (k = 1; stripAcross && k < shape.cols; k++) {
       ctx.fillRect(left + k * w * z - 1, sy - 3, 2, 3);
     }
     // Hard steps: an arrow just outside each strip, on the step.
