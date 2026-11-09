@@ -6,9 +6,9 @@
  * while the tool is selected: five mix levels, four kinds of line, two
  * grids, two stipples. Fill mode paints the pattern into a connected area of one color,
  * like the bucket. Ramp mode fills that area with a gradient along a drag,
- * from the first color to the second, in one of four styles (ordered,
- * scattered, lines, dashes), optionally through every palette color between
- * the two.
+ * from the first color to the second, in one of seven styles (ordered,
+ * scattered, lines, dashes, upright dashes, dotted lines, plus shapes),
+ * optionally through every palette color between the two.
  *
  * The levels come from one 4x4 ordered (Bayer) matrix, so each level holds
  * every pixel of the lighter ones below it. A ramp drawn 25 -> 50 -> 75 has
@@ -146,9 +146,36 @@
     { id: 'ordered', title: 'Ordered: the Mix steps, one pixel at a time' },
     { id: 'scattered', title: 'Scattered dots, thick near the join and thin away from it' },
     { id: 'lines', title: 'Lines across, thinning away from the join' },
-    { id: 'dashes', title: 'Dashes two pixels wide, laid like bricks' }
+    { id: 'dashes', title: 'Dashes two pixels wide, laid like bricks' },
+    { id: 'upright', title: 'Upright dashes two pixels tall' },
+    { id: 'dotted', title: 'Lines that break into dots away from the join' },
+    { id: 'plus', title: 'Plus shapes, the other color on each side of the join' }
   ];
   var LINE_ORDER = [0, 2, 1, 3];
+
+  // Plus shapes: 16 crosses on a 16 x 16 tile that wraps, rows of four with
+  // every other row shifted by two, so no two crosses touch. They switch on
+  // in the order the stipple map gives their centers, which scatters them.
+  var PLUS_RANK = (function () {
+    var centers = [];
+    for (var cy = 0; cy < 16; cy += 4) {
+      for (var cx = 0; cx < 16; cx += 4) {
+        var x = (cx + ((cy / 4) % 2) * 2) & 15;
+        centers.push({ x: x, y: cy, order: STIPPLE[cy * 16 + x] });
+      }
+    }
+    centers.sort(function (a, b) { return a.order - b.order; });
+    var map = [];
+    for (var i = 0; i < 256; i++) {
+      map.push(-1);
+    }
+    centers.forEach(function (c, rank) {
+      [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]].forEach(function (d) {
+        map[((c.y + d[1]) & 15) * 16 + ((c.x + d[0]) & 15)] = rank;
+      });
+    });
+    return map;
+  })();
 
   function threshold(style, x, y) {
     if (style === 'scattered') {
@@ -159,6 +186,14 @@
     }
     if (style === 'dashes') {
       return (BAYER[y & 3][((x >> 1) + 1) & 3] + 0.5) / 16;
+    }
+    if (style === 'upright') {
+      return (BAYER[(y >> 1) & 3][(x + 1) & 3] + 0.5) / 16;
+    }
+    if (style === 'dotted') {
+      // Whole rows in line order, and inside a row the pixels in dot order,
+      // so a row starts as dots, closes up, and ends as a full line.
+      return (LINE_ORDER[y & 3] + (LINE_ORDER[x & 3] + 0.5) / 4) / 4;
     }
     return (BAYER[y & 3][(x + 1) & 3] + 0.5) / 16;
   }
@@ -187,6 +222,15 @@
     }
     if (u >= 1) {
       return false;
+    }
+    if (style === 'plus') {
+      // First half: crosses of the end color appear on the start color.
+      // Second half: crosses of the start color thin out on the end color.
+      var rank = PLUS_RANK[(y & 15) * 16 + (x & 15)];
+      if (u < 0.5) {
+        return !(rank >= 0 && rank < u * 32);
+      }
+      return rank >= 0 && rank < (1 - u) * 32;
     }
     return threshold(style, x, y) >= u;
   }
