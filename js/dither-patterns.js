@@ -2,10 +2,10 @@
  * dither-patterns.js - Patterns for the Dithering tool, and a Fill mode.
  *
  * Stock Piskel dithers one way: a 50% checkerboard of the primary and
- * secondary colors. This adds a swatch strip under the preview while the
- * tool is selected: five mix levels, four kinds of line, two grids. Fill
- * mode paints the pattern into a connected area of one color, like the
- * bucket.
+ * secondary colors. This adds a small swatch panel beside the tool column
+ * while the tool is selected: five mix levels, four kinds of line, two
+ * grids. Fill mode paints the pattern into a connected area of one color,
+ * like the bucket.
  *
  * The levels come from one 4x4 ordered (Bayer) matrix, so each level holds
  * every pixel of the lighter ones below it. A ramp drawn 25 -> 50 -> 75 has
@@ -210,17 +210,14 @@
   var SWATCH_CELLS = 8;
   var SWATCH_SCALE = 3;
 
+  // Drawn in the stock icons' light gray on near black, not in the
+  // student's colors: two neighboring shades (the usual way to dither) would
+  // make every swatch look flat, and two strong colors shimmer at this size.
   function drawSwatch(canvas, id) {
     var ctx = canvas.getContext('2d');
-    var colors = pskl.app.selectedColorsService;
-    var first = colors.getPrimaryColor();
-    var second = colors.getSecondaryColor();
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
     for (var y = 0; y < SWATCH_CELLS; y++) {
       for (var x = 0; x < SWATCH_CELLS; x++) {
-        var c = usesPrimary(id, x, y) ? first : second;
-        // A see-through color shows as the dark panel behind it.
-        ctx.fillStyle = isSeeThrough(c) ? '#1b1b1b' : c;
+        ctx.fillStyle = usesPrimary(id, x, y) ? '#e4e4e4' : '#1b1b1b';
         ctx.fillRect(x * SWATCH_SCALE, y * SWATCH_SCALE, SWATCH_SCALE, SWATCH_SCALE);
       }
     }
@@ -234,33 +231,31 @@
     panel = el('div');
     panel.id = 'dth-panel';
     panel.style.display = 'none';
-    panel.appendChild(el('div', 'dth-title', 'Dither pattern'));
 
     var mode = el('div', 'dth-seg');
     [['paint', 'Paint'], ['fill', 'Fill']].forEach(function (m) {
       var b = el('button', '', m[1]);
       b.type = 'button';
       b.setAttribute('data-mode', m[0]);
+      b.title = m[0] === 'fill' ? 'Click an area to fill it with the pattern' : 'Paint the pattern with the brush';
       mode.appendChild(b);
     });
     panel.appendChild(mode);
 
-    [['mix', 'Mix'], ['lines', 'Lines'], ['grid', 'Grid']].forEach(function (g) {
-      panel.appendChild(el('div', 'dth-label', g[1]));
-      var row = el('div', 'dth-swatches');
-      PATTERNS.filter(function (p) { return p.group === g[0]; }).forEach(function (p) {
-        var b = el('button', 'dth-swatch');
-        b.type = 'button';
-        b.title = p.title;
-        b.setAttribute('aria-label', p.title);
-        b.setAttribute('data-pattern', p.id);
-        var cv = el('canvas');
-        cv.width = cv.height = SWATCH_CELLS * SWATCH_SCALE;
-        b.appendChild(cv);
-        row.appendChild(b);
-      });
-      panel.appendChild(row);
+    var grid = el('div', 'dth-swatches');
+    PATTERNS.forEach(function (p) {
+      var b = el('button', 'dth-swatch');
+      b.type = 'button';
+      b.title = p.title + '. Right-click on the canvas swaps your two colors.';
+      b.setAttribute('aria-label', p.title);
+      b.setAttribute('data-pattern', p.id);
+      var cv = el('canvas');
+      cv.width = cv.height = SWATCH_CELLS * SWATCH_SCALE;
+      drawSwatch(cv, p.id);
+      b.appendChild(cv);
+      grid.appendChild(b);
     });
+    panel.appendChild(grid);
 
     panel.appendChild(el('div', 'dth-note'));
 
@@ -280,9 +275,10 @@
       syncPanel();
     });
 
-    // After the text panel when it is there, so the two never swap places.
-    var after = document.getElementById('txt-panel') || host;
-    after.parentNode.insertBefore(panel, after.nextSibling);
+    // Floats beside the tool column, over the frame list, so the right
+    // column (layers, palettes, the transition preview) never moves.
+    document.body.appendChild(panel);
+    window.addEventListener('resize', placePanel);
     syncPanel();
   }
 
@@ -296,21 +292,27 @@
     panel.querySelectorAll('button[data-pattern]').forEach(function (b) {
       var id = b.getAttribute('data-pattern');
       b.classList.toggle('dth-on', id === settings.pattern);
-      drawSwatch(b.firstChild, id);
     });
-    var notes = [];
-    notes.push(settings.mode === 'fill' ?
-      'Click an area to fill it with the pattern.' :
-      'Paints your first and second colors in this pattern.');
-    notes.push('Right-click swaps the two colors.');
-    if (isSeeThrough(pskl.app.selectedColorsService.getSecondaryColor())) {
-      notes.push('Your second color is see-through, so the gaps in the pattern will erase.');
-    }
     var box = panel.querySelector('.dth-note');
-    box.innerHTML = '';
-    notes.forEach(function (n, i) {
-      box.appendChild(el('div', i === 2 ? 'dth-warn' : '', n));
-    });
+    var clear = isSeeThrough(pskl.app.selectedColorsService.getSecondaryColor());
+    box.textContent = clear ? 'Second color is see-through: gaps erase.' : '';
+    box.style.display = clear ? '' : 'none';
+    placePanel();
+  }
+
+  function placePanel() {
+    if (!panel || panel.style.display === 'none') {
+      return;
+    }
+    var btn = document.querySelector('[data-tool-id="' + TOOL_ID + '"]');
+    var column = document.getElementById('tool-section');
+    if (!btn || !column) {
+      return;
+    }
+    var b = btn.getBoundingClientRect();
+    panel.style.left = (column.getBoundingClientRect().right + 2) + 'px';
+    var top = Math.min(b.top, window.innerHeight - panel.offsetHeight - 6);
+    panel.style.top = Math.max(6, top) + 'px';
   }
 
   function isCurrent() {
@@ -322,6 +324,7 @@
     if (panel) {
       panel.style.display = isCurrent() ? '' : 'none';
       syncPanel();
+      placePanel();
     }
   }
 
@@ -332,27 +335,25 @@
     var style = document.createElement('style');
     style.id = 'dth-styles';
     style.textContent = [
-      '#dth-panel { margin: 6px 0 0 0; padding: 5px 8px 8px; background: #262626;',
-      '  border: 1px solid #3d3d3d; border-radius: 3px; color: #b3b3b3; font-size: 12px; }',
-      '#dth-panel .dth-title { font-weight: bold; color: #d3d3d3; margin-bottom: 5px; }',
-      '#dth-panel .dth-label { margin: 7px 0 3px; font-size: 10px; letter-spacing: .06em;',
-      '  text-transform: uppercase; color: #8a8a8a; }',
-      '#dth-panel .dth-seg { display: flex; border: 1px solid #4a4a4a; border-radius: 4px; overflow: hidden; }',
-      '#dth-panel .dth-seg button { flex: 1 1 0; min-width: 0; height: 22px; margin: 0; padding: 0 2px;',
+      '#dth-panel { position: fixed; z-index: 900; box-sizing: border-box; width: 116px; padding: 5px;',
+      '  background: #262626; border: 1px solid #4a4a4a; border-radius: 3px;',
+      '  box-shadow: 0 2px 8px rgba(0, 0, 0, .5); color: #b3b3b3; font-size: 11px; }',
+      '#dth-panel .dth-seg { display: flex; margin-bottom: 5px; border: 1px solid #4a4a4a;',
+      '  border-radius: 3px; overflow: hidden; }',
+      '#dth-panel .dth-seg button { flex: 1 1 0; min-width: 0; height: 22px; margin: 0; padding: 0;',
       '  font-family: inherit; font-size: 11px; color: #bdbdbd; background: #2e2e2e; border: 0;',
       '  border-left: 1px solid #4a4a4a; cursor: pointer; }',
       '#dth-panel .dth-seg button:first-child { border-left: 0; }',
       '#dth-panel .dth-seg button:hover { color: #fff; background: #3a3a3a; }',
       '#dth-panel .dth-seg button.dth-on { color: #1d1d1d; background: ' + ACCENT + '; font-weight: bold; }',
-      '#dth-panel .dth-swatches { display: flex; flex-wrap: wrap; gap: 4px; }',
-      '#dth-panel .dth-swatch { width: 30px; height: 30px; margin: 0; padding: 2px; box-sizing: border-box;',
-      '  background: #2e2e2e; border: 1px solid #4a4a4a; border-radius: 3px; cursor: pointer; }',
+      '#dth-panel .dth-swatches { display: grid; grid-template-columns: repeat(3, 32px); gap: 4px; }',
+      '#dth-panel .dth-swatch { width: 32px; height: 32px; margin: 0; padding: 0; box-sizing: border-box;',
+      '  display: flex; align-items: center; justify-content: center; background: #1b1b1b;',
+      '  border: 2px solid #3a3a3a; border-radius: 3px; cursor: pointer; }',
       '#dth-panel .dth-swatch:hover { border-color: #8a8a8a; }',
-      '#dth-panel .dth-swatch.dth-on { border: 2px solid ' + ACCENT + '; padding: 1px; }',
+      '#dth-panel .dth-swatch.dth-on { border-color: ' + ACCENT + '; }',
       '#dth-panel .dth-swatch canvas { display: block; width: 24px; height: 24px; image-rendering: pixelated; }',
-      '#dth-panel .dth-note { margin-top: 7px; font-size: 11px; line-height: 1.4; color: #8a8a8a; }',
-      '#dth-panel .dth-note div { margin-top: 2px; }',
-      '#dth-panel .dth-warn { color: #c9a53d; }'
+      '#dth-panel .dth-note { margin-top: 5px; line-height: 1.3; color: #c9a53d; }'
     ].join('\n');
     document.head.appendChild(style);
   }
