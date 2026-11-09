@@ -5,7 +5,8 @@
  * secondary colors. This adds a small swatch panel beside the tool column
  * while the tool is selected: five mix levels, four kinds of line, two
  * grids. Fill mode paints the pattern into a connected area of one color,
- * like the bucket.
+ * like the bucket. Ramp mode fills that area with a gradient along a drag,
+ * stepping through the mix levels from the first color to the second.
  *
  * The levels come from one 4x4 ordered (Bayer) matrix, so each level holds
  * every pixel of the lighter ones below it. A ramp drawn 25 -> 50 -> 75 has
@@ -74,7 +75,35 @@
     return p.test(x, y);
   }
 
-  var api = { patterns: PATTERNS, byId: byId, usesPrimary: usesPrimary, DEFAULT_ID: DEFAULT_ID };
+  // Ramp: solid first color, the five mix levels, solid second color, in
+  // equal bands along the drag. The same steps as the Mix swatches, so a
+  // ramp and a hand-drawn band of swatches match pixel for pixel.
+  var RAMP_LEVELS = [16, 14, 12, 8, 4, 2, 0];
+
+  // Which band pixel (x, y) falls in for a drag from a to b, by where it
+  // lands along the drag. -1 when the drag has no length.
+  function rampBand(ax, ay, bx, by, x, y) {
+    var dx = bx - ax;
+    var dy = by - ay;
+    var len2 = dx * dx + dy * dy;
+    if (!len2) {
+      return -1;
+    }
+    var t = ((x - ax) * dx + (y - ay) * dy) / len2;
+    var n = RAMP_LEVELS.length;
+    return Math.min(n - 1, Math.max(0, Math.floor(t * n)));
+  }
+
+  // ox, oy: where the frame's corner sits in the pattern.
+  function rampUsesPrimary(ax, ay, bx, by, x, y, ox, oy) {
+    var band = rampBand(ax, ay, bx, by, x, y);
+    return band >= 0 && BAYER[(y + (oy || 0)) & 3][(x + (ox || 0) + 1) & 3] < RAMP_LEVELS[band];
+  }
+
+  var api = {
+    patterns: PATTERNS, byId: byId, usesPrimary: usesPrimary, DEFAULT_ID: DEFAULT_ID,
+    RAMP_LEVELS: RAMP_LEVELS, rampBand: rampBand, rampUsesPrimary: rampUsesPrimary
+  };
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = api;
   }
@@ -93,8 +122,9 @@
 
   var settings = { pattern: DEFAULT_ID, mode: 'paint' };
   var panel = null;
-  // Fill happens once per real press. Transition mode re-presses the tool
-  // when a drag crosses into the next tile, and that must not fill again.
+  // Fill and Ramp take their area once per real press. Transition mode
+  // re-presses the tool when a drag crosses into the next tile, and that
+  // must not start another one.
   var fillArmed = false;
 
   function loadSettings() {
@@ -103,7 +133,8 @@
       if (p && byId(p)) {
         settings.pattern = p;
       }
-      settings.mode = localStorage.getItem(MODE_KEY) === 'fill' ? 'fill' : 'paint';
+      var m = localStorage.getItem(MODE_KEY);
+      settings.mode = m === 'fill' || m === 'ramp' ? m : 'paint';
     } catch (e) {}
   }
 
@@ -130,6 +161,10 @@
     return primary ? colors.getPrimaryColor() : colors.getSecondaryColor();
   }
 
+  function swapped() {
+    return pskl.app.mouseStateService.isRightButtonPressed();
+  }
+
   function patchTool() {
     var Tool = pskl.tools.drawing.DitheringTool;
     var proto = Tool.prototype;
@@ -142,7 +177,7 @@
     };
 
     proto.applyToolAt = function (col, row, frame, overlay, event) {
-      if (settings.mode !== 'fill') {
+      if (settings.mode === 'paint') {
         return penApply.call(this, col, row, frame, overlay, event);
       }
       this.previousCol = col;
@@ -152,27 +187,66 @@
       }
       fillArmed = false;
       var pixels = pskl.PixelUtils.getSimilarConnectedPixelsFromFrame(frame, col, row);
+      if (settings.mode === 'ramp') {
+        this.ramp = { from: { col: col, row: row }, area: pixels, o: origin() };
+        return;
+      }
       var o = origin();
       for (var i = 0; i < pixels.length; i++) {
         this.draw(colorAt(pixels[i].col, pixels[i].row, o), pixels[i].col, pixels[i].row, frame, overlay);
       }
     };
 
+    // The ramp is redrawn on every move and only shown on the overlay until
+    // release. The stock draw() writes a see-through color straight into
+    // the frame, which would erase the art under every spot the drag passed.
+    function drawRamp(tool, col, row, overlay) {
+      var r = tool.ramp;
+      var colors = pskl.app.selectedColorsService;
+      var first = colors.getPrimaryColor();
+      var second = colors.getSecondaryColor();
+      var swap = swapped();
+      overlay.clear();
+      tool.pixels = [];
+      if (col === r.from.col && row === r.from.row) {
+        return;
+      }
+      for (var i = 0; i < r.area.length; i++) {
+        var p = r.area[i];
+        var primary = rampUsesPrimary(r.from.col, r.from.row, col, row, p.col, p.row, r.o.x, r.o.y) !== swap;
+        var color = primary ? first : second;
+        overlay.setPixel(p.col, p.row, color);
+        tool.pixels.push({ col: p.col, row: p.row, color: color });
+      }
+    }
+
     proto.moveToolAt = function (col, row, frame, overlay, event) {
-      if (settings.mode !== 'fill') {
+      if (settings.mode === 'paint') {
         return penMove.call(this, col, row, frame, overlay, event);
       }
       this.previousCol = col;
       this.previousRow = row;
+      if (settings.mode === 'ramp' && this.ramp) {
+        drawRamp(this, col, row, overlay);
+      }
     };
 
     // A press that filled nothing (a drag carried into another tile, a
-    // click off the canvas) would otherwise leave an empty undo step.
+    // click off the canvas, a ramp with no drag) would otherwise leave an
+    // empty undo step.
     proto.releaseToolAt = function (col, row, frame, overlay, event) {
-      if (settings.mode === 'fill' && !this.pixels.length) {
+      this.ramp = null;
+      if (settings.mode !== 'paint' && !this.pixels.length) {
+        overlay.clear();
         return;
       }
       return penRelease.call(this, col, row, frame, overlay, event);
+    };
+
+    // Transition mode carries pen strokes from tile to tile. A fill or a
+    // ramp belongs to the tile it was pressed in.
+    proto.staysOnTile = function () {
+      return settings.mode !== 'paint';
     };
 
     var host = document.getElementById('drawing-canvas-container');
@@ -233,11 +307,15 @@
     panel.style.display = 'none';
 
     var mode = el('div', 'dth-seg');
-    [['paint', 'Paint'], ['fill', 'Fill']].forEach(function (m) {
+    [['paint', 'Paint'], ['fill', 'Fill'], ['ramp', 'Ramp']].forEach(function (m) {
       var b = el('button', '', m[1]);
       b.type = 'button';
       b.setAttribute('data-mode', m[0]);
-      b.title = m[0] === 'fill' ? 'Click an area to fill it with the pattern' : 'Paint the pattern with the brush';
+      b.title = {
+        paint: 'Paint the pattern with the brush',
+        fill: 'Click an area to fill it with the pattern',
+        ramp: 'Drag across an area to blend from your first color to your second'
+      }[m[0]];
       mode.appendChild(b);
     });
     panel.appendChild(mode);
@@ -293,10 +371,16 @@
       var id = b.getAttribute('data-pattern');
       b.classList.toggle('dth-on', id === settings.pattern);
     });
+    panel.classList.toggle('dth-ramp', settings.mode === 'ramp');
     var box = panel.querySelector('.dth-note');
-    var clear = isSeeThrough(pskl.app.selectedColorsService.getSecondaryColor());
-    box.textContent = clear ? 'Second color is see-through: gaps erase.' : '';
-    box.style.display = clear ? '' : 'none';
+    box.innerHTML = '';
+    if (settings.mode === 'ramp') {
+      box.appendChild(el('div', '', 'Drag from the first color toward the second. Uses the Mix steps.'));
+    }
+    if (isSeeThrough(pskl.app.selectedColorsService.getSecondaryColor())) {
+      box.appendChild(el('div', 'dth-warn', 'Second color is see-through: gaps erase.'));
+    }
+    box.style.display = box.childNodes.length ? '' : 'none';
     placePanel();
   }
 
@@ -353,7 +437,9 @@
       '#dth-panel .dth-swatch:hover { border-color: #8a8a8a; }',
       '#dth-panel .dth-swatch.dth-on { border-color: ' + ACCENT + '; }',
       '#dth-panel .dth-swatch canvas { display: block; width: 24px; height: 24px; image-rendering: pixelated; }',
-      '#dth-panel .dth-note { margin-top: 5px; line-height: 1.3; color: #c9a53d; }'
+      '#dth-panel .dth-note { margin-top: 5px; line-height: 1.3; color: #8a8a8a; }',
+      '#dth-panel .dth-note .dth-warn { color: #c9a53d; }',
+      '#dth-panel.dth-ramp .dth-swatches { opacity: .3; pointer-events: none; }'
     ].join('\n');
     document.head.appendChild(style);
   }

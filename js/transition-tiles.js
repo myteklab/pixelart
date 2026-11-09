@@ -614,7 +614,7 @@
       hideHover();
       var tool = this.currentToolBehavior;
       var carries = tool instanceof pskl.tools.drawing.SimplePen &&
-        !this.isPickingColor && !pskl.app.mouseStateService.isMiddleButtonPressed();
+        !(tool.staysOnTile && tool.staysOnTile()) && !this.isPickingColor && !pskl.app.mouseStateService.isMiddleButtonPressed();
       if (!carries) {
         return original.call(this, x, y, event);
       }
